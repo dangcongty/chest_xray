@@ -188,7 +188,7 @@ class BaseModel(torch.nn.Module):
                 embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
                 if m.i == max_idx:
                     return torch.unbind(torch.cat(embeddings, 1), dim=0)
-        return x, [y[16], y[19], y[22]]
+        return x, [y[10], y[16], y[19], y[22]]
 
     def _predict_augment(self, x):
         """Perform augmentations on input image x and return augmented inference."""
