@@ -225,8 +225,8 @@ class BaseValidator:
                     self.loss += yolo_loss[1]
 
                     # contrastive
-                    global_ct_loss, global_ct_loss_list, local_ct_loss = ct_losses
-                    trainer.ct_loss_trackers.append(global_ct_loss_list, global_ct_loss, local_ct_loss, mode='val')
+                    global_ct_loss, local_ct_loss = ct_losses
+                    trainer.ct_loss_trackers.append(global_ct_loss, local_ct_loss, mode='val')
 
             # Postprocess
             with dt[3]:

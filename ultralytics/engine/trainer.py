@@ -436,8 +436,8 @@ class BaseTrainer:
                         # loss, self.loss_items = self.model(batch)
                         yolo_loss, ct_losses = self.model(batch)
                         loss, self.loss_items = yolo_loss
-                        global_ct_loss, global_ct_loss_list, local_ct_loss = ct_losses
-                    a1 = a2 = 1
+                        global_ct_loss, local_ct_loss = ct_losses
+                    a1 = a2 = 20
                     total_loss = loss.sum() + a1 * global_ct_loss + a2 * local_ct_loss
                     self.loss = total_loss
                     if RANK != -1:
@@ -447,7 +447,7 @@ class BaseTrainer:
                     )
 
                     # tensorboard contrastive
-                    self.ct_loss_trackers.append(global_ct_loss_list, global_ct_loss, local_ct_loss)
+                    self.ct_loss_trackers.append(global_ct_loss, local_ct_loss)
 
                 # Backward
                 self.scaler.scale(self.loss).backward()

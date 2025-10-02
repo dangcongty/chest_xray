@@ -326,7 +326,7 @@ class BaseModel(torch.nn.Module):
         if verbose:
             LOGGER.info(f"Transferred {len_updated_csd}/{len(self.model.state_dict())} items from pretrained weights")
 
-    def loss(self, batch, preds=None, feats=None):
+    def loss(self, batch, preds=None, feats=None, ct_layers = 10):
         """
         Compute loss.
 
@@ -342,40 +342,21 @@ class BaseModel(torch.nn.Module):
         
         # YOLO Loss 
         yolo_loss = self.criterion(preds, batch)
-        # Global Contrastive Loss
+        
+        # Contrastive Loss
         abnormally_idx = torch.unique(batch['batch_idx'])
         full_batch_idx = torch.arange(0, len(batch['img']), device=batch['img'][0].device)
         nofinding_idx = full_batch_idx[~torch.isin(full_batch_idx, abnormally_idx)]
+        
+        global_ct_losses = self.global_contrastive_loss(feats[0], abnormally_idx, nofinding_idx)
+        # local_ct_loss = self.local_contrastive_loss(batch, feats[1])
+        local_ct_loss = torch.tensor([0], device=feats[0].device)
 
-        global_ct_losses = []
-        for f_idx, feat in enumerate(feats):
-            abnormally_feat = feat[abnormally_idx.to(torch.long)].mean((2, 3)) # Global Average Pooling
-            nofinding_feat = feat[nofinding_idx.to(torch.long)].mean((2, 3))
-            # Normalize vectors 
-            abn_norm = F.normalize(abnormally_feat, p=2, dim=1)  # [N1, C]
-            nof_norm = F.normalize(nofinding_feat, p=2, dim=1)  # [N2, C]
-            # Compute similarities
-            pos_sim = torch.mm(nof_norm, nof_norm.t())  # [N1, N1]
-            neg_sim = torch.mm(nof_norm, abn_norm.t())  # [N1, N2]
-            # Positive pairs
-            pos_mask = ~torch.eye(pos_sim.shape[0], dtype=bool, device=pos_sim.device)
-            if len(nofinding_feat) <= 1:
-                pos_loss = 0
-            else:
-                pos_loss = (1 - pos_sim[pos_mask]).mean()
-            # Negative pairs
-            margin = 0.5
-            neg_loss = F.relu(neg_sim - margin).mean()
+        return yolo_loss, [global_ct_losses, local_ct_loss]
 
-            global_ct_losses.append(pos_loss + neg_loss)
-        total_global_ct_losses = torch.stack(global_ct_losses).sum()
-        # Local Contrastive Loss
-        '''
-            boxes: N, 5 => [b_id, x, y, x, y]
-        '''
-        local_ct_feat = feats[0]
+    def local_contrastive_loss(self, batch, feat, roi_size = (20, 20), temperature = 0.07):
         bbox_xywh = batch['bboxes'] 
-        H, W = local_ct_feat.shape[2:]
+        H, W = feat.shape[2:]
         scale = torch.tensor([W, H, W, H], device=bbox_xywh.device)
         bbox_xyxy = bbox_xywh.clone()
         bbox_xyxy[:, 2:] = bbox_xyxy[:, :2] + bbox_xyxy[:, 2:]  # (x2 = x+w, y2 = y+h)
@@ -383,28 +364,41 @@ class BaseModel(torch.nn.Module):
         bbox_xyxy_with_ids = torch.concat([batch['batch_idx'].view((-1, 1)), bbox_xyxy], -1)
         # ROI feature 
         roi_feats = self.roi_crop_resize(
-            features=local_ct_feat,
+            features=feat,
             bboxes=bbox_xyxy_with_ids,
-            output_size=(20, 20)
+            output_size=roi_size
         )
-        temperature = 0.07
         embeddings = F.adaptive_avg_pool2d(roi_feats, 1).squeeze(-1).squeeze(-1)  # [N, C]
         embeddings = F.normalize(embeddings, dim=1)  # L2 normalize để dùng cosine similarity
         N, C = embeddings.size()
         sim_matrix = torch.matmul(embeddings, embeddings.T) / temperature  # [N, N]
-        # mask để loại chính mình
         mask = torch.eye(N, device=embeddings.device).bool()
-        # mask positive: cùng class
         labels = batch['cls'].contiguous().view(-1, 1)
         positive_mask = torch.eq(labels, labels.T).to(embeddings.device) & ~mask
-        # log-softmax trên similarity
         log_prob = F.log_softmax(sim_matrix, dim=1)  # [N, N]
-        # chỉ lấy giá trị ở positive pairs
         mean_log_prob_pos = (positive_mask * log_prob).sum(1) / positive_mask.sum(1).clamp(min=1)
-        # loss = - trung bình log_prob positives
-        local_ct_loss = -mean_log_prob_pos.mean()
+        local_ct_loss = -mean_log_prob_pos.sum()
+        return local_ct_loss
 
-        return yolo_loss, [total_global_ct_losses, global_ct_losses, local_ct_loss]
+    def global_contrastive_loss(self, feat, abnormally_idx, nofinding_idx):
+        pooling_size = 5
+        B, C, H, W = feat.shape
+        feat = self.adaptive_to_avgpool(feat, (pooling_size, pooling_size))
+        feat = feat.view((B, -1))
+
+        abnormally_feat = feat[abnormally_idx.to(torch.long)]
+        nofinding_feat = feat[nofinding_idx.to(torch.long)]
+        # Normalize vectors 
+        abn_norm = F.normalize(abnormally_feat, p=2, dim=1)  # [N1, C]
+        nof_norm = F.normalize(nofinding_feat, p=2, dim=1)  # [N2, C]
+        pos_sim = torch.mm(abn_norm, abn_norm.t())  # [N1, N1]
+        neg_sim = torch.mm(abn_norm, nof_norm.t())  # [N1, N2]
+        pos_mask = ~torch.eye(pos_sim.shape[0], dtype=bool, device=pos_sim.device)
+        margin = 0.5
+        pos_loss = (1 - pos_sim[pos_mask]).mean()
+        neg_loss = F.relu(neg_sim - margin).mean()
+        global_ct_losses = pos_loss + neg_loss
+        return global_ct_losses
 
     def init_criterion(self):
         """Initialize the loss criterion for the BaseModel."""
@@ -543,7 +537,21 @@ class BaseModel(torch.nn.Module):
             outputs.append(feat.unsqueeze(0))
 
         return torch.cat(outputs, dim=0)  # (K,C,h,w)
+    
+    @staticmethod
+    def adaptive_to_avgpool(x, output_size):
+        # x: (B, C, H, W)
+        H, W = x.shape[2:]
+        H_out, W_out = output_size
 
+        stride_h = H // H_out
+        stride_w = W // W_out
+
+        kernel_h = H - (H_out - 1) * stride_h
+        kernel_w = W - (W_out - 1) * stride_w
+
+        return F.avg_pool2d(x, kernel_size=(kernel_h, kernel_w),
+                            stride=(stride_h, stride_w))
 
 
 class DetectionModel(BaseModel):

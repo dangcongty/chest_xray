@@ -71,10 +71,15 @@ def process(target_size, rad_scores, iou_thresh):
     os.makedirs(f'{save_dir}/vis', exist_ok=True)
     for image_id, annos in tqdm(group_imageIDs):
         has_finding = 'No finding' not in list(annos['class_name'])
-        img = get_image(f'datasets/train/{image_id}.dicom')
-        img, scale, pad_x, pad_y = resize_and_pad_image(img, target_size, pad_value=0)
-        if not has_finding:
+
+        
+        if not os.path.exists(f'{save_dir}/images/{image_id}.png'):
+            img = get_image(f'datasets/train/{image_id}.dicom')
+            img, scale, pad_x, pad_y = resize_and_pad_image(img, target_size, pad_value=0)
             cv2.imwrite(f'{save_dir}/images/{image_id}.png', img)
+            continue
+
+        if not has_finding:
             with open(f'{save_dir}/labels/{image_id}.txt', 'w') as f:
                 f.write("")
         
