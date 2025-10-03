@@ -380,7 +380,8 @@ class BaseModel(torch.nn.Module):
         local_ct_loss = -mean_log_prob_pos.sum()
         return local_ct_loss
 
-    def global_contrastive_loss(self, feat, abnormally_idx, nofinding_idx):
+    def global_contrastive_loss(self, feat, abnormally_idx, nofinding_idx, ct_type = 'contrastive', temperature=0.07):
+
         pooling_size = 5
         B, C, H, W = feat.shape
         feat = self.adaptive_to_avgpool(feat, (pooling_size, pooling_size))
@@ -388,16 +389,53 @@ class BaseModel(torch.nn.Module):
 
         abnormally_feat = feat[abnormally_idx.to(torch.long)]
         nofinding_feat = feat[nofinding_idx.to(torch.long)]
-        # Normalize vectors 
-        abn_norm = F.normalize(abnormally_feat, p=2, dim=1)  # [N1, C]
-        nof_norm = F.normalize(nofinding_feat, p=2, dim=1)  # [N2, C]
-        pos_sim = torch.mm(abn_norm, abn_norm.t())  # [N1, N1]
-        neg_sim = torch.mm(abn_norm, nof_norm.t())  # [N1, N2]
+        
+        # Normalize
+        abn_norm = F.normalize(abnormally_feat, p=2, dim=1)
+        nof_norm = F.normalize(nofinding_feat, p=2, dim=1)
+        
+        N1 = abn_norm.shape[0]
+        N2 = nof_norm.shape[0]
+        if N1 == 0 or N2 == 0:
+            # ko có pair samples
+            return torch.tensor(0.0, device=feat.device)
+        
+
+        pos_sim = torch.mm(abn_norm, abn_norm.t())
+        neg_sim = torch.mm(abn_norm, nof_norm.t())
+        
         pos_mask = ~torch.eye(pos_sim.shape[0], dtype=bool, device=pos_sim.device)
-        margin = 0.5
-        pos_loss = (1 - pos_sim[pos_mask]).mean()
-        neg_loss = F.relu(neg_sim - margin).mean()
-        global_ct_losses = pos_loss + neg_loss
+        
+        if ct_type == 'contrastive':
+            # Điều chỉnh 1: Tăng margin
+            margin = 0.8  # hoặc 0.9
+            # Điều chỉnh 2: Thay đổi công thức loss
+            pos_loss = (1 - pos_sim[pos_mask]).mean()
+            # Penalize negative pairs có similarity cao
+            neg_loss = torch.clamp(neg_sim + margin, min=0).mean()  # đổi dấu margin
+            # Điều chỉnh 3: Thêm weight
+            alpha = 2.0  # tăng trọng số cho neg_loss
+            global_ct_losses = pos_loss + alpha * neg_loss
+            
+        elif ct_type == 'info_nce':
+            pos_sim = pos_sim/temperature
+            neg_sim = neg_sim/temperature
+            global_ct_losses = 0
+            for i in range(N1):
+                # Positives
+                pos_logits = pos_sim[i][pos_mask[i]]
+                # Hard negatives: top-K negative có similarity cao nhất
+                K = min(N2, 10)  # lấy 10 hard negatives
+                hard_neg_logits, _ = torch.topk(neg_sim[i], K)
+                # Combine
+                for pos_logit in pos_logits:
+                    numerator = pos_logit
+                    denominator = torch.logsumexp(
+                        torch.cat([pos_logit.unsqueeze(0), hard_neg_logits]),
+                        dim=0
+                    )
+                    global_ct_losses += -numerator + denominator
+
         return global_ct_losses
 
     def init_criterion(self):

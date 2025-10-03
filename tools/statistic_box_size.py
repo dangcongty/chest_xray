@@ -21,9 +21,13 @@ min_ws, min_hs, labels = [], [], []
 for c in sorted(stats.keys()):
     stat_c = np.array(stats[c]).reshape((-1, 2))
     stat_c = np.where(stat_c < 0, 0, stat_c)
+    count = (np.where(stat_c <= 32, 1, 0).sum(-1) > 0).sum()
+
     min_ws.append(stat_c[:,0].min())
     min_hs.append(stat_c[:,1].min())
     labels.append(f"Class {c}")
+
+    print(f'Class: {c}: {count}')
 
 x = np.arange(len(labels))  # vị trí class
 width = 0.35                # độ rộng của mỗi cột
