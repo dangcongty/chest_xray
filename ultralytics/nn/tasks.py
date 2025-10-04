@@ -175,6 +175,7 @@ class BaseModel(torch.nn.Module):
         y, dt, embeddings = [], [], []  # outputs
         embed = frozenset(embed) if embed is not None else {-1}
         max_idx = max(embed)
+        ct_feats = []
         for m in self.model:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
@@ -182,13 +183,15 @@ class BaseModel(torch.nn.Module):
                 self._profile_one_layer(m, x, dt)
             x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
+            if m.i in [10, 19, 22, 25, 28]:
+                ct_feats.append(x)
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
             if m.i in embed:
                 embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
                 if m.i == max_idx:
                     return torch.unbind(torch.cat(embeddings, 1), dim=0)
-        return x, [y[10], y[16], y[19], y[22]]
+        return x, ct_feats
 
     def _predict_augment(self, x):
         """Perform augmentations on input image x and return augmented inference."""
@@ -326,7 +329,7 @@ class BaseModel(torch.nn.Module):
         if verbose:
             LOGGER.info(f"Transferred {len_updated_csd}/{len(self.model.state_dict())} items from pretrained weights")
 
-    def loss(self, batch, preds=None, feats=None, ct_layers = 10):
+    def loss(self, batch, preds=None, feats=None):
         """
         Compute loss.
 
@@ -349,39 +352,97 @@ class BaseModel(torch.nn.Module):
         nofinding_idx = full_batch_idx[~torch.isin(full_batch_idx, abnormally_idx)]
         
         global_ct_losses = self.global_contrastive_loss(feats[0], abnormally_idx, nofinding_idx)
-        # local_ct_loss = self.local_contrastive_loss(batch, feats[1])
-        local_ct_loss = torch.tensor([0], device=feats[0].device)
+        local_ct_loss = self.local_contrastive_loss(batch, feats[1])
+        # local_ct_loss = torch.tensor([0], device=feats[0].device) # TODO
 
         return yolo_loss, [global_ct_losses, local_ct_loss]
 
     def local_contrastive_loss(self, batch, feat, roi_size = (20, 20), temperature = 0.07):
+        """
+        Tính contrastive loss giữa các ROI features từ các ảnh khác nhau
+        
+        Args:
+            feat: Feature map từ backbone [B, C, H, W]
+            batch: Dict chứa 'bboxes' [N, 4] (xywh), 'batch_idx' [N], 'cls' [N]
+            roi_crop_resize: Hàm crop và resize ROI
+            roi_size: Output size cho ROI features
+            temperature: Temperature parameter cho contrastive loss
+        
+        Returns:
+            local_ct_loss: Contrastive loss value
+        """
         bbox_xywh = batch['bboxes'] 
         H, W = feat.shape[2:]
         scale = torch.tensor([W, H, W, H], device=bbox_xywh.device)
+        
+        # Convert xywh to xyxy
         bbox_xyxy = bbox_xywh.clone()
-        bbox_xyxy[:, 2:] = bbox_xyxy[:, :2] + bbox_xyxy[:, 2:]  # (x2 = x+w, y2 = y+h)
+        bbox_xyxy[:, 2:] = bbox_xyxy[:, :2] + bbox_xyxy[:, 2:]
         bbox_xyxy = bbox_xyxy * scale
-        bbox_xyxy_with_ids = torch.concat([batch['batch_idx'].view((-1, 1)), bbox_xyxy], -1)
-        # ROI feature 
+        
+        # Prepare for ROI pooling [batch_idx, x1, y1, x2, y2]
+        bbox_xyxy_with_ids = torch.cat([
+            batch['batch_idx'].view(-1, 1), 
+            bbox_xyxy
+        ], dim=-1)
+        
+        # Extract ROI features
         roi_feats = self.roi_crop_resize(
             features=feat,
             bboxes=bbox_xyxy_with_ids,
             output_size=roi_size
-        )
+        )  # [N, C, roi_size, roi_size]
+        
+        # Global average pooling và normalize
         embeddings = F.adaptive_avg_pool2d(roi_feats, 1).squeeze(-1).squeeze(-1)  # [N, C]
-        embeddings = F.normalize(embeddings, dim=1)  # L2 normalize để dùng cosine similarity
-        N, C = embeddings.size()
+        embeddings = F.normalize(embeddings, dim=1)  # L2 normalize
+        
+        # Compute similarity matrix
         sim_matrix = torch.matmul(embeddings, embeddings.T) / temperature  # [N, N]
-        mask = torch.eye(N, device=embeddings.device).bool()
-        labels = batch['cls'].contiguous().view(-1, 1)
-        positive_mask = torch.eq(labels, labels.T).to(embeddings.device) & ~mask
+        
+        # Create masks
+        N = embeddings.size(0)
+        device = embeddings.device
+        
+        # Mask để loại bỏ self-similarity
+        self_mask = torch.eye(N, device=device, dtype=torch.bool)
+        
+        # Mask để loại bỏ các box trong cùng một ảnh (chỉ tính loss giữa các ảnh khác nhau)
+        batch_idx = batch['batch_idx'].view(-1, 1)  # [N, 1]
+        same_image_mask = (batch_idx == batch_idx.T)  # [N, N]
+        
+        # Mask cho positive pairs: cùng class VÀ khác ảnh
+        labels = batch['cls'].view(-1, 1)  # [N, 1]
+        same_class_mask = (labels == labels.T)  # [N, N]
+        positive_mask = same_class_mask & (~same_image_mask) & (~self_mask)
+        
+        # Mask cho negative pairs: khác ảnh (bao gồm cả khác class và cùng class)
+        # Tuy nhiên trong InfoNCE, negatives là tất cả các samples khác ngoài positives
+        negative_mask = ~same_image_mask & ~self_mask
+        
+        # Check nếu không có positive pairs
+        num_positives = positive_mask.sum(1)
+        if num_positives.sum() == 0:
+            return torch.tensor(0.0, device=device)
+        
+        # Compute InfoNCE loss (Supervised Contrastive Loss)
+        # exp_sim = torch.exp(sim_matrix)  # Không cần vì dùng log_softmax
+        
+        # Log-sum-exp trick để stable hơn
         log_prob = F.log_softmax(sim_matrix, dim=1)  # [N, N]
-        mean_log_prob_pos = (positive_mask * log_prob).sum(1) / positive_mask.sum(1).clamp(min=1)
-        local_ct_loss = -mean_log_prob_pos.sum()
+        
+        # Lấy log probability của positive pairs
+        # Sum over positives và average
+        mean_log_prob_pos = (positive_mask * log_prob).sum(1) / num_positives.clamp(min=1)
+        
+        # Loss = -log(prob) của positive pairs
+        # Chỉ tính loss cho các samples có positive pairs
+        valid_samples = num_positives > 0
+        local_ct_loss = -mean_log_prob_pos[valid_samples].mean()
+        
         return local_ct_loss
 
     def global_contrastive_loss(self, feat, abnormally_idx, nofinding_idx, ct_type = 'contrastive', temperature=0.07):
-
         pooling_size = 5
         B, C, H, W = feat.shape
         feat = self.adaptive_to_avgpool(feat, (pooling_size, pooling_size))
@@ -396,7 +457,7 @@ class BaseModel(torch.nn.Module):
         
         N1 = abn_norm.shape[0]
         N2 = nof_norm.shape[0]
-        if N1 == 0 or N2 == 0:
+        if N1 <= 1 or N2 <= 1:
             # ko có pair samples
             return torch.tensor(0.0, device=feat.device)
         

@@ -15,7 +15,12 @@ import cv2
 import numpy as np
 from torch.utils.data import Dataset
 
-from ultralytics.data.utils import FORMATS_HELP_MSG, HELP_URL, IMG_FORMATS, check_file_speeds
+from ultralytics.data.utils import (
+    FORMATS_HELP_MSG,
+    HELP_URL,
+    IMG_FORMATS,
+    check_file_speeds,
+)
 from ultralytics.utils import DEFAULT_CFG, LOCAL_RANK, LOGGER, NUM_THREADS, TQDM
 from ultralytics.utils.patches import imread
 
@@ -390,7 +395,10 @@ class BaseDataset(Dataset):
         Returns:
             (dict[str, Any]): Label dictionary with image and metadata.
         """
-        label = deepcopy(self.labels[index])  # requires deepcopy() https://github.com/ultralytics/ultralytics/pull/1948
+        try:
+            label = deepcopy(self.labels[index])  # requires deepcopy() https://github.com/ultralytics/ultralytics/pull/1948
+        except Exception as e:
+            print(e, index)
         label.pop("shape", None)  # shape is for rect, remove it
         label["img"], label["ori_shape"], label["resized_shape"] = self.load_image(index)
         label["ratio_pad"] = (

@@ -15,6 +15,23 @@ CLASSES = [
     "Pulmonary fibrosis",
 ]
 
+CLASSES_VN = [
+    "Phình động mạch chủ",
+    "Xẹp phổi",
+    "Vôi hóa",
+    "Tim to",
+    "Đông đặc phổi",
+    "Bệnh phổi kẽ",
+    "Thâm nhiễm",
+    "Đục/Mờ phổi",
+    "Nốt/ Khối u",
+    "Tổn thương khác",
+    "Tràn dịch màng phổi",
+    "Dày màng phổi",
+    "Tràn khí màng phổi",
+    "Xơ phổi",
+]
+
 CLASS_COLORS_BGR = {
     "Aortic enlargement": (180, 119, 31),   # #1f77b4
     "Atelectasis": (14, 127, 255),          # #ff7f0e
