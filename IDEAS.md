@@ -14,8 +14,10 @@
 
 6. Mất cân bằng dữ liệu trong 1 batch => CT khó học hơn => Sampler cho Dataloader => Xong sampler => upsampling cho abnormally 
 
+7. Bỏ bớt background => mAP tăng => false detect khá nhiều
 
 
+8. miss-detect nhiều + cosine score pos-neg cao => chưa phân biệt đc đâu là vùng background đâu là vùng có bệnh => tạo ROI => ko augmentation được do box bị thay đôi vị trí
 ################################################################3
 
 
@@ -24,3 +26,5 @@ Thêm conf-aware vào dataloader
 
 ################### Vấn đề ###########################3
 1. Augmentation: Có nên fliplr, scale ko?
+
+

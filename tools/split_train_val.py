@@ -39,6 +39,10 @@ class YOLODatasetSplitter:
                         parts = line.split()
                         class_id = int(parts[0])
                         bbox = [float(x) for x in parts[1:5]]
+                        check_bbox = np.array(bbox)
+                        
+                        if (check_bbox>1).sum() > 0 or (check_bbox<0).sum() > 0:
+                            return -1
                         annotations.append([class_id] + bbox)
         except FileNotFoundError:
             pass  # File không có annotations
@@ -62,11 +66,23 @@ class YOLODatasetSplitter:
         
         # Tìm tất cả ảnh
         image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
+        limit_bg = 3000
+        num_bg = 0
+        num_obj = 0
         for img_path in images_dir.iterdir():
             if img_path.suffix.lower() in image_extensions:
                 # Tìm file label tương ứng
                 label_path = labels_dir / f"{img_path.stem}.txt"
                 annotations = self.parse_yolo_label(label_path)
+                if not isinstance(annotations, list):
+                    continue
+                if num_bg > limit_bg and len(annotations) == 0:
+                    continue
+                
+                if len(annotations) == 0:
+                    num_bg += 1
+                else:
+                    num_obj += 1
                 dataset[img_path.name] = annotations
         
         print(f"✓ Đã load {len(dataset)} images từ {images_dir}")
@@ -247,11 +263,11 @@ class YOLODatasetSplitter:
                             train_class_count, val_class_count)
         
 
-        with open('datasets/process/train.txt', 'w') as f:
+        with open('datasets/process/train_3k_bg.txt', 'w') as f:
             for name in train_imgs:
                 path = f'datasets/process/images/{name}'
                 f.write(f'{path}\n')
-        with open('datasets/process/val.txt', 'w') as f:
+        with open('datasets/process/val_3k_bg.txt', 'w') as f:
             for name in val_imgs:
                 path = f'datasets/process/images/{name}'
                 f.write(f'{path}\n')
