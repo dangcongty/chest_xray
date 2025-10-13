@@ -221,7 +221,7 @@ class BaseValidator:
             # Loss
             with dt[2]:
                 if self.training:
-                    yolo_loss, ct_losses = model.loss(batch, preds, feats)
+                    yolo_loss, ct_losses = model.loss(batch, preds, feats, mode='val')
                     self.loss += yolo_loss[1]
 
                     # contrastive

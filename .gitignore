@@ -16,3 +16,4 @@ runs/
 *.jpg
 *.pt
 .vscode/
+lung_seg/

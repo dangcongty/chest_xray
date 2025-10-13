@@ -148,10 +148,10 @@ def process(target_size, rad_scores, iou_thresh):
                                     
                                     x21, y21, x22, y22 = box2
 
-                                    x1m = (x21 + x11)//2
-                                    y1m = (y21 + y11)//2
-                                    x2m = (x22 + x12)//2
-                                    y2m = (y22 + y12)//2
+                                    x1m = (x21 + x11)/2
+                                    y1m = (y21 + y11)/2
+                                    x2m = (x22 + x12)/2
+                                    y2m = (y22 + y12)/2
                                     
                                     merge_box = [x1m, y1m, x2m, y2m]
                                 merge_box = np.array(merge_box, dtype = np.int32).tolist()

@@ -129,11 +129,12 @@ class BalancedBatchSampler(torch.utils.data.sampler.Sampler):
     - Class đa số được sử dụng đầy đủ qua các epoch
     
     Args:
-        batch_size: kích thước batch (nên là số chẵn)
+        batch_size: kích thước batch
         drop_last: bỏ batch cuối nếu không đủ samples
         shuffle: có shuffle indices không
         bg_ratio: tỷ lệ background trong batch (0.5 = 50%)
-        label_txt: đường dẫn file train.txt (optional, mặc định datasets/process/train.txt)
+        label_files: list các đường dẫn image từ train.txt
+        max_oversample_ratio: giới hạn tỷ lệ oversample (vd: 2.0 = lặp tối đa 2 lần)
     """
     
     def __init__(self, batch_size, drop_last=True, shuffle=True, bg_ratio=0.5, label_files=[], max_oversample_ratio=None):
@@ -142,7 +143,7 @@ class BalancedBatchSampler(torch.utils.data.sampler.Sampler):
         self.shuffle = shuffle
         self.bg_ratio = bg_ratio
         self.label_files = label_files
-        self.max_oversample_ratio = max_oversample_ratio  # Giới hạn tỷ lệ oversample (vd: 2.0 = lặp tối đa 2 lần)
+        self.max_oversample_ratio = max_oversample_ratio
         
         # Tính số samples mỗi class trong 1 batch
         self.bg_per_batch = int(batch_size * bg_ratio)
@@ -157,23 +158,22 @@ class BalancedBatchSampler(torch.utils.data.sampler.Sampler):
         print(f"[INFO] Each batch: {self.bg_per_batch} bg + {self.obj_per_batch} obj")
         
         # Tính số batch dựa trên class có NHIỀU samples hơn
-        # Để tận dụng hết data của class đa số
         if len(self.bg_indices) > len(self.obj_indices):
             # Background là đa số
-            max_bg_batches = len(self.bg_indices) // self.bg_per_batch
+            max_bg_batches = len(self.bg_indices) // self.bg_per_batch if self.bg_per_batch > 0 else 0
             
             # Giới hạn oversample nếu cần
-            if self.max_oversample_ratio:
+            if self.max_oversample_ratio and self.obj_per_batch > 0:
                 max_allowed = int(len(self.obj_indices) * self.max_oversample_ratio / self.obj_per_batch)
                 self.num_batches = min(max_bg_batches, max_allowed)
             else:
                 self.num_batches = max_bg_batches
         else:
             # Object là đa số
-            max_obj_batches = len(self.obj_indices) // self.obj_per_batch
+            max_obj_batches = len(self.obj_indices) // self.obj_per_batch if self.obj_per_batch > 0 else 0
             
             # Giới hạn oversample nếu cần
-            if self.max_oversample_ratio:
+            if self.max_oversample_ratio and self.bg_per_batch > 0:
                 max_allowed = int(len(self.bg_indices) * self.max_oversample_ratio / self.bg_per_batch)
                 self.num_batches = min(max_obj_batches, max_allowed)
             else:
@@ -192,7 +192,7 @@ class BalancedBatchSampler(torch.utils.data.sampler.Sampler):
         """Quét các file label và phân loại thành bg/obj indices"""
         bg_indices, obj_indices = [], []
         invalid_count = 0
-        # QUAN TRỌNG: Dùng index gốc từ file train.txt
+        
         for dataset_idx, img_path in enumerate(self.label_files):
             # Chuyển đổi từ image path sang label path
             label_path = img_path.replace('images', 'labels')
@@ -284,8 +284,21 @@ class BalancedBatchSampler(torch.utils.data.sampler.Sampler):
         for batch_idx in range(self.num_batches):
             batch = []
             
-            # Lấy bg samples
-            for _ in range(self.bg_per_batch):
+            # Lấy san kẽ obj và bg theo pattern: obj-bg-obj-bg-obj-bg...
+            # Tính xem phải lấy bao nhiêu cặp obj-bg
+            min_pairs = min(self.obj_per_batch, self.bg_per_batch)
+            
+            # Lấy các cặp obj-bg
+            for _ in range(min_pairs):
+                # Lấy 1 obj
+                if obj_ptr >= len(obj_pool):
+                    if self.drop_last:
+                        return
+                    obj_ptr = 0
+                batch.append(obj_pool[obj_ptr])
+                obj_ptr += 1
+                
+                # Lấy 1 bg
                 if bg_ptr >= len(bg_pool):
                     if self.drop_last:
                         return
@@ -293,8 +306,9 @@ class BalancedBatchSampler(torch.utils.data.sampler.Sampler):
                 batch.append(bg_pool[bg_ptr])
                 bg_ptr += 1
             
-            # Lấy obj samples
-            for _ in range(self.obj_per_batch):
+            # Lấy phần dư nếu obj_per_batch != bg_per_batch
+            # Nếu obj nhiều hơn bg trong batch
+            for _ in range(self.obj_per_batch - min_pairs):
                 if obj_ptr >= len(obj_pool):
                     if self.drop_last:
                         return
@@ -302,16 +316,20 @@ class BalancedBatchSampler(torch.utils.data.sampler.Sampler):
                 batch.append(obj_pool[obj_ptr])
                 obj_ptr += 1
             
-            # Shuffle trong batch để trộn bg và obj
-            if self.shuffle:
-                random.shuffle(batch)
+            # Nếu bg nhiều hơn obj trong batch
+            for _ in range(self.bg_per_batch - min_pairs):
+                if bg_ptr >= len(bg_pool):
+                    if self.drop_last:
+                        return
+                    bg_ptr = 0
+                batch.append(bg_pool[bg_ptr])
+                bg_ptr += 1
             
             yield batch
     
     def __len__(self):
         """Trả về số lượng batches trong một epoch"""
         return self.num_batches
-
 
 
 class _RepeatSampler:

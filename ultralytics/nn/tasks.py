@@ -7,6 +7,7 @@ import types
 from copy import deepcopy
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch._dynamo
 import torch.nn as nn
@@ -392,7 +393,7 @@ class BaseModel(torch.nn.Module):
         return distances
 
 
-    def loss(self, batch, preds=None, feats=None):
+    def loss(self, batch, preds=None, feats=None, mode='train'):
         """
         Compute loss.
 
@@ -417,14 +418,14 @@ class BaseModel(torch.nn.Module):
         full_batch_idx = torch.arange(0, len(batch['img']), device=batch['img'][0].device)
         nofinding_idx = full_batch_idx[~torch.isin(full_batch_idx, abnormally_idx)]
         
-        global_ct_losses = self.global_contrastive_loss(feats[0], abnormally_idx, nofinding_idx)
-        local_ct_loss = self.local_contrastive_loss(batch, feats[1])
-        # global_ct_losses = torch.tensor([0], device=feats[0].device) # TODO
+        # global_ct_losses = self.global_contrastive_loss(feats[0], abnormally_idx, nofinding_idx)
+        local_ct_loss = self.local_contrastive_loss(batch, feats[1], mode = mode)
+        global_ct_losses = torch.tensor([0], device=feats[0].device) # Mosaic gây lỗi
         # local_ct_loss = torch.tensor([0], device=feats[0].device) # TODO
 
         return yolo_loss, [global_ct_losses, local_ct_loss]
 
-    def local_contrastive_loss(self, batch, feat, roi_size = (20, 20), temperature = 0.07, ct_type = 'margin'):
+    def local_contrastive_loss(self, batch, feat, roi_size = (20, 20), temperature = 0.07, ct_type = 'margin', mode = 'train'):
         """
         Compute contrastive loss for object detection
         
@@ -449,62 +450,6 @@ class BaseModel(torch.nn.Module):
         bbox_xyxy[:, 1] = _bbox_xywh[:, 1] - _bbox_xywh[:, 3]/2
         bbox_xyxy[:, 2] = _bbox_xywh[:, 0] + _bbox_xywh[:, 2]/2
         bbox_xyxy[:, 3] = _bbox_xywh[:, 1] + _bbox_xywh[:, 3]/2
-
-        # Tìm các box kế bên vùng bênh => vùng ko bệnh
-        batch_rois = []
-        for c in _class:
-            rois = self.rois[int(c)]
-            batch_rois.append(rois.to(bbox_xywh.device))
-
-
-        _bbox_xyxy = torch.tensor([], device=bbox_xywh.device)
-        _batch_c = torch.tensor([], device=bbox_xywh.device)
-        _batch_idx = torch.tensor([], device=bbox_xywh.device)
-        for _id in torch.unique(box_ids):
-            mask_id = box_ids == _id
-            idx = torch.where(mask_id)[0]
-            start_id = int(idx[0])
-            end_id = int(idx[-1])
-            bbox = bbox_xyxy[mask_id.flatten()]
-            rois = batch_rois[start_id:end_id+1]
-            c = _class[mask_id.flatten()]
-
-            for k, (box, _c) in enumerate(zip(bbox, c)):
-                _rois_k = rois[k]
-                # filter distance
-                center_rois = torch.stack([(_rois_k[:, 0] + _rois_k[:, 2])/2, (_rois_k[:, 1] + _rois_k[:, 3])/2], 1)
-                center_box = torch.stack([(box[0] + box[2])/2, (box[1] + box[3])/2])
-                threshold_dist = torch.sqrt(torch.sum((center_box - box[:2])**2))
-
-                dists = self.center_distance(center_rois, center_box)
-                accepted_dists = dists > threshold_dist
-                filtered_dists = dists[accepted_dists]
-                dist_rois = _rois_k[accepted_dists]
-                sorted_indices = torch.argsort(filtered_dists)
-                dist_rois = dist_rois[sorted_indices]
-                filtered_dists = filtered_dists[sorted_indices]
-                # filter iou
-                ious = self.box_iou(dist_rois, box)
-                accepted_ious = ious == 0
-                iou_rois = dist_rois[accepted_ious][:self.num_rois]
-                rois_c = torch.tensor([_c +50 for _ in range(len(iou_rois))], device=bbox_xywh.device)
-                # TODO: Các box roi ko được overlap với các box bệnh khác
-                _bbox_xyxy = torch.cat([_bbox_xyxy, box.view((-1, 4)), iou_rois])
-                _batch_c = torch.cat([_batch_c, _c, rois_c])
-
-                # debug
-                # import cv2
-                # import numpy as np
-                # vis = np.zeros((640, 640, 3), dtype=np.uint8)
-                # box_np = (box.cpu().numpy()*640).astype(int)
-                # roi_np = (iou_rois.cpu().numpy()*640).astype(int)
-                # cv2.rectangle(vis, box_np[:2], box_np[2:], (255, 0, 0), 1)
-                # for rnp in roi_np:
-                #     cv2.rectangle(vis, rnp[:2], rnp[2:], (0, 255, 0), 1)
-                # cv2.imwrite('test.jpg', vis)
-
-            _batch_idx = torch.cat([_batch_idx, torch.tensor([_id for _ in range(len(_bbox_xyxy))], device=bbox_xywh.device)])
-
         bbox_xyxy = bbox_xyxy * scale
         
         # Prepare for ROI pooling [batch_idx, x1, y1, x2, y2]
@@ -513,21 +458,52 @@ class BaseModel(torch.nn.Module):
             bbox_xyxy
         ], dim=-1)
         
+        # No-finding Boxes
+        if mode == 'train':
+            nofinding_boxes_with_id = torch.tensor([], device=feat.device)
+            no_finding_class_pairs = torch.tensor([], device=feat.device)
+            img_size = batch['img'][0].shape[1]
+            for img_id, _batch in enumerate(batch['ct_boxes']):
+                if len(_batch):
+                    for ct_c in _batch:
+                        boxes = _batch[ct_c]
+                        boxes = scale * torch.tensor(boxes, device=feat.device)/img_size
+                        img_ids = torch.ones(boxes.shape[0], device = feat.device) * img_id
+                        nf_c = torch.ones(boxes.shape[0], device = feat.device) * ct_c
+                        boxes_with_id = torch.cat([img_ids.unsqueeze(-1), boxes], -1)
+                        
+                        if len(nofinding_boxes_with_id) == 0:
+                            nofinding_boxes_with_id = boxes_with_id
+                            no_finding_class_pairs = nf_c
+                        else:
+                            nofinding_boxes_with_id = torch.cat([nofinding_boxes_with_id, boxes_with_id])
+                            no_finding_class_pairs = torch.cat([no_finding_class_pairs, nf_c])
+            if len(nofinding_boxes_with_id):
+                roi_feats_nf = self.roi_crop_resize(
+                    features=feat,
+                    bboxes=nofinding_boxes_with_id,
+                    output_size=roi_size
+                )  # [N, C, roi_size, roi_size]
+                embeddings_nf = F.adaptive_avg_pool2d(roi_feats_nf, 1).squeeze(-1).squeeze(-1)  # [N, C]
+                embeddings_nf = F.normalize(embeddings_nf, dim=1)  # L2 normalize     
+
+
         # Extract ROI features
         roi_feats = self.roi_crop_resize(
             features=feat,
             bboxes=bbox_xyxy_with_ids,
             output_size=roi_size
         )  # [N, C, roi_size, roi_size]
-        
+        # SPPF
+
+
         # Global average pooling and normalize
         embeddings = F.adaptive_avg_pool2d(roi_feats, 1).squeeze(-1).squeeze(-1)  # [N, C]
         embeddings = F.normalize(embeddings, dim=1)  # L2 normalize
-        
+
+
         # Compute similarity matrix
         sim_matrix = torch.matmul(embeddings, embeddings.T)  # [N, N]
-        if ct_type == 'infonce':
-            sim_matrix = sim_matrix / temperature
         
         # Create masks
         N = embeddings.size(0)
@@ -555,87 +531,38 @@ class BaseModel(torch.nn.Module):
         if num_positives.sum() == 0:
             return torch.tensor(0.0, device=device, requires_grad=True)
         
-        # ============================================
-        # LOSS COMPUTATION - Choose one based on ct_type
-        # ============================================
+        # Margin-based loss
+        # Positive: push similarity → 1
+        # Negative: push similarity < (1 - margin)
         
-        if ct_type == 'infonce':
-            # InfoNCE Loss (supervised contrastive learning)
-            # For each anchor, loss = -log( sum(exp(sim_pos)) / sum(exp(sim_all)) )
-            
-            loss = 0
-            valid_anchors = 0
-            
-            for i in range(N):
-                if num_positives[i] == 0:
-                    continue
-                    
-                # Get positive and all other similarities
-                pos_sim = sim_matrix[i][positive_mask[i]]  # [num_pos_i]
-                all_sim = sim_matrix[i][~self_mask[i]]     # [N-1]
-                
-                # InfoNCE loss for this anchor
-                numerator = torch.exp(pos_sim).sum()
-                denominator = torch.exp(all_sim).sum()
-                loss += -torch.log(numerator / denominator)
-                valid_anchors += 1
-            
-            local_ct_loss = loss / max(valid_anchors, 1)
+        margin = 0.5
         
-        elif ct_type == 'triplet':
-            # Triplet Loss with hard mining
-            # loss = max(0, sim(a,n) - sim(a,p) + margin)
-            
-            margin = 0.5
-            loss = 0
-            valid_anchors = 0
-            
-            for i in range(N):
-                if num_positives[i] == 0:
-                    continue
-                
-                # Get hardest positive (lowest similarity)
-                pos_sims = sim_matrix[i][positive_mask[i]]
-                hardest_pos_sim = pos_sims.min()
-                
-                # Get hardest negative (highest similarity)
-                neg_sims = sim_matrix[i][negative_mask[i]]
-                if len(neg_sims) == 0:
-                    continue
-                hardest_neg_sim = neg_sims.max()
-                
-                # Triplet loss
-                loss += F.relu(hardest_neg_sim - hardest_pos_sim + margin)
-                valid_anchors += 1
-            
-            local_ct_loss = loss / max(valid_anchors, 1)
+        # Average positive similarity
+        pos_sum = (positive_mask * sim_matrix).sum()
+        positive = pos_sum / positive_mask.sum().clamp(min=1)
         
-        elif ct_type == 'margin':
-            # Margin-based loss
-            # Positive: push similarity → 1
-            # Negative: push similarity < (1 - margin)
-            
-            margin = 0.5
-            
-            # Average positive similarity
-            pos_sum = (positive_mask * sim_matrix).sum()
-            positive = pos_sum / positive_mask.sum().clamp(min=1)
-            
-            # Average negative similarity
-            neg_sum = (negative_mask * sim_matrix).sum()
-            negative = neg_sum / negative_mask.sum().clamp(min=1)
-            
-            # Loss components
-            pos_loss = (1 - positive)  # Want positive → 1
-            neg_loss = F.relu(negative + margin)  # Want negative < 0.5 (if margin=0.5)
-            
-            # Weighted sum
-            alpha = 2.0
-            local_ct_loss = pos_loss + alpha * neg_loss
+        # Average negative similarity
+        neg_sum = (negative_mask * sim_matrix).sum()
+        negative = neg_sum / negative_mask.sum().clamp(min=1)
         
+        # Loss components
+        pos_loss = (1 - positive)  # Want positive → 1
+        neg_loss = torch.clamp(negative - margin, min = 0)  # Want negative < 0.5 (if margin=0.5)
+
+        # sửa lại neg_loss <=
+        # Weighted sum
+        alpha = 2.0
+        if mode == 'train':
+            if len(nofinding_boxes_with_id):
+                nf_sim_matrix = torch.matmul(embeddings, embeddings_nf.T)  # [N, N]
+                nf_loss = torch.clamp(nf_sim_matrix - margin, min = 0).mean() 
+                nf = 10
+                local_ct_loss = pos_loss + alpha * neg_loss + nf * nf_loss
+            else:
+                local_ct_loss = pos_loss + alpha * neg_loss
         else:
-            raise ValueError(f"Unknown ct_type: {ct_type}")
-        
+            local_ct_loss = pos_loss + alpha * neg_loss
+    
         return local_ct_loss
 
     def global_contrastive_loss(self, feat, abnormally_idx, nofinding_idx, ct_type = 'contrastive', temperature=0.07):

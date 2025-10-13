@@ -8,7 +8,7 @@ from scipy.spatial import ConvexHull
 from shapely.geometry import Polygon, box
 from sklearn.cluster import KMeans
 from sklearn.ensemble import IsolationForest
-from statitics_data import box_pos, box_size
+from tools.statistics_data import box_pos, box_size
 
 sys.path.append(os.getcwd())
 from utils.classes import CLASS_COLORS_BGR, CLASSES

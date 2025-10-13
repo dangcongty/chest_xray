@@ -51,11 +51,11 @@ def class_distribute():
     plt.savefig('datasets/after_process.jpg')
 
 
-
-
-def box_size(plot = False):
+def box_size(plot=False, save_outliers=True):
     stats_w = {i: [] for i in range(14)}
     stats_h = {i: [] for i in range(14)}
+    
+    # Thu thập dữ liệu
     for txt_path in glob('datasets/process/labels/*'):
         with open(txt_path, 'r') as f:
             data = f.readlines()
@@ -69,14 +69,60 @@ def box_size(plot = False):
             if w > 0.9 or h > 0.9:
                 print(txt_path)
 
-            stats_w[c].append(w)
-            stats_h[c].append(h)
+            stats_w[c].append((w, txt_path))
+            stats_h[c].append((h, txt_path))
+    
+    # Tính outliers và lưu thông tin
+    if save_outliers:
+        all_outlier_paths = set()
+        
+        for c in range(14):
+            if not stats_w[c]:
+                continue
+                
+            # Tách data và paths
+            w_values = [item[0] for item in stats_w[c]]
+            w_paths = [item[1] for item in stats_w[c]]
+            h_values = [item[0] for item in stats_h[c]]
+            h_paths = [item[1] for item in stats_h[c]]
+            
+            # Tính Q1, Q3, IQR cho width
+            q1_w = np.percentile(w_values, 25)
+            q3_w = np.percentile(w_values, 75)
+            iqr_w = q3_w - q1_w
+            lower_bound_w = q1_w - 1.5 * iqr_w
+            upper_bound_w = q3_w + 1.5 * iqr_w
+            
+            # Tính Q1, Q3, IQR cho height
+            q1_h = np.percentile(h_values, 25)
+            q3_h = np.percentile(h_values, 75)
+            iqr_h = q3_h - q1_h
+            lower_bound_h = q1_h - 1.5 * iqr_h
+            upper_bound_h = q3_h + 1.5 * iqr_h
+            
+            # Tìm outliers paths
+            for val, path in zip(w_values, w_paths):
+                if val < lower_bound_w or val > upper_bound_w:
+                    all_outlier_paths.add(path)
+            
+            for val, path in zip(h_values, h_paths):
+                if val < lower_bound_h or val > upper_bound_h:
+                    all_outlier_paths.add(path)
+        
+        # Ghi ra file TXT (mỗi dòng một path)
+        with open('datasets/outliers.txt', 'w', encoding='utf-8') as f:
+            for path in sorted(all_outlier_paths):
+                f.write(f"{path}\n")
+        
+        print(f"✓ Outliers saved to: datasets/outliers.txt")
+        print(f"  Total outlier files: {len(all_outlier_paths)}")
+    
+    # Chuẩn bị data cho plot
+    boxsize_w = [[item[0] for item in stats_w[c]] for c in range(14)]
+    boxsize_h = [[item[0] for item in stats_h[c]] for c in range(14)]
     
     if plot:
         labels = [f'{i}' for i in range(14)]
-
-        boxsize_w = [stats_w[c] for c in stats_w]
-        boxsize_h = [stats_h[c] for c in stats_h]
 
         fig, ax = plt.subplots(figsize=(20, 6))
 
@@ -95,48 +141,54 @@ def box_size(plot = False):
 
         # Hiển thị median
         for pos, data in zip(positions1, boxsize_w):
-            median = np.median(data)
-            ax.text(pos, median, f"{median:.1f}", ha='center', va='bottom', fontsize=9, color="blue")
+            if data:
+                median = np.median(data)
+                ax.text(pos, median, f"{median:.3f}", ha='center', va='bottom', fontsize=9, color="blue")
 
         for pos, data in zip(positions2, boxsize_h):
-            median = np.median(data)
-            ax.text(pos, median, f"{median:.1f}", ha='center', va='bottom', fontsize=9, color="green")
+            if data:
+                median = np.median(data)
+                ax.text(pos, median, f"{median:.3f}", ha='center', va='bottom', fontsize=9, color="green")
 
         # Hiển thị mean (chấm đỏ)
         for pos, data in zip(positions1, boxsize_w):
-            mean = np.mean(data)
-            ax.plot(pos, mean, "ro", markersize=4)
+            if data:
+                mean = np.mean(data)
+                ax.plot(pos, mean, "ro", markersize=4)
 
         for pos, data in zip(positions2, boxsize_h):
-            mean = np.mean(data)
-            ax.plot(pos, mean, "ro", markersize=4)
+            if data:
+                mean = np.mean(data)
+                ax.plot(pos, mean, "ro", markersize=4)
 
         # Hiển thị số outlier / tổng - %
         for pos, data, fliers in zip(positions1, boxsize_w, bp1['fliers']):
-            total = len(data)
-            out = len(fliers.get_ydata())
-            perc = out / total * 100
-            y = np.max(data) * 1.05
-            ax.text(pos, y, f"{out}/{total}\n{perc:.1f}%", 
-                    ha='center', va='bottom', fontsize=8, color="blue", rotation=45)
+            if data:
+                total = len(data)
+                out = len(fliers.get_ydata())
+                perc = out / total * 100 if total > 0 else 0
+                y = np.max(data) * 1.05 if data else 0
+                ax.text(pos, y, f"{out}/{total}\n{perc:.1f}%", 
+                        ha='center', va='bottom', fontsize=8, color="blue", rotation=45)
 
         for pos, data, fliers in zip(positions2, boxsize_h, bp2['fliers']):
-            total = len(data)
-            out = len(fliers.get_ydata())
-            perc = out / total * 100
-            y = np.max(data) * 1.05
-            ax.text(pos, y, f"{out}/{total}\n{perc:.1f}%", 
-                    ha='center', va='bottom', fontsize=8, color="green", rotation=45)
+            if data:
+                total = len(data)
+                out = len(fliers.get_ydata())
+                perc = out / total * 100 if total > 0 else 0
+                y = np.max(data) * 1.05 if data else 0
+                ax.text(pos, y, f"{out}/{total}\n{perc:.1f}%", 
+                        ha='center', va='bottom', fontsize=8, color="green", rotation=45)
 
         # Cấu hình trục
         ax.set_xticks(range(1, len(labels) + 1))
         ax.set_xticklabels(labels)
         ax.set_xlabel("Class", fontsize=14)
         ax.set_ylabel("px norm", fontsize=14)
-        ax.set_title("So sánh kích thước bounding box giữa các classa", fontsize=16)
+        ax.set_title("So sánh kích thước bounding box giữa các class", fontsize=16)
         ax.grid(True, linestyle="--", alpha=0.7)
 
-        # Legend để dưới cùng, không che chữ
+        # Legend
         legend_elements = [
             Patch(facecolor='lightblue', label='Boxsize W'),
             Patch(facecolor='lightgreen', label='Boxsize H'),
@@ -146,9 +198,11 @@ def box_size(plot = False):
 
         plt.tight_layout()
         plt.savefig("datasets/box_size_chart.jpg", dpi=300)
-        
-    return stats_w, stats_h
-
+        print(f"✓ Chart saved to: datasets/box_size_chart.jpg")
+    
+    # Trả về stats dạng cũ
+    return {c: [item[0] for item in stats_w[c]] for c in range(14)}, \
+           {c: [item[0] for item in stats_h[c]] for c in range(14)}
 
 def box_pos(plot = False):
     stats_center = {i: [] for i in range(14)}
@@ -316,4 +370,4 @@ def box_co_occurrence():
 
 if __name__ == '__main__':
     # class_distribute()
-    box_size()
+    box_size(save_outliers=True)
