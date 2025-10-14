@@ -280,17 +280,58 @@ class BalancedBatchSampler(torch.utils.data.sampler.Sampler):
         # Tạo các batch
         bg_ptr = 0
         obj_ptr = 0
-        
-        for batch_idx in range(self.num_batches):
-            batch = []
-            
-            # Lấy san kẽ obj và bg theo pattern: obj-bg-obj-bg-obj-bg...
-            # Tính xem phải lấy bao nhiêu cặp obj-bg
-            min_pairs = min(self.obj_per_batch, self.bg_per_batch)
-            
-            # Lấy các cặp obj-bg
-            for _ in range(min_pairs):
-                # Lấy 1 obj
+        spaced = False
+        if spaced:
+            for batch_idx in range(self.num_batches):
+                batch = []
+                
+                # Lấy san kẽ obj và bg theo pattern: obj-bg-obj-bg-obj-bg...
+                # Tính xem phải lấy bao nhiêu cặp obj-bg
+                min_pairs = min(self.obj_per_batch, self.bg_per_batch)
+                
+                # Lấy các cặp obj-bg
+                for _ in range(min_pairs):
+                    # Lấy 1 obj
+                    if obj_ptr >= len(obj_pool):
+                        if self.drop_last:
+                            return
+                        obj_ptr = 0
+                    batch.append(obj_pool[obj_ptr])
+                    obj_ptr += 1
+                    
+                    # Lấy 1 bg
+                    if bg_ptr >= len(bg_pool):
+                        if self.drop_last:
+                            return
+                        bg_ptr = 0
+                    batch.append(bg_pool[bg_ptr])
+                    bg_ptr += 1
+                
+                # Lấy phần dư nếu obj_per_batch != bg_per_batch
+                # Nếu obj nhiều hơn bg trong batch
+                for _ in range(self.obj_per_batch - min_pairs):
+                    if obj_ptr >= len(obj_pool):
+                        if self.drop_last:
+                            return
+                        obj_ptr = 0
+                    batch.append(obj_pool[obj_ptr])
+                    obj_ptr += 1
+                
+                # Nếu bg nhiều hơn obj trong batch
+                for _ in range(self.bg_per_batch - min_pairs):
+                    if bg_ptr >= len(bg_pool):
+                        if self.drop_last:
+                            return
+                        bg_ptr = 0
+                    batch.append(bg_pool[bg_ptr])
+                    bg_ptr += 1
+                yield batch
+        else:
+            for batch_idx in range(self.num_batches):
+                batch = []
+                
+                # Lấy (batch_size - 1) ảnh bg + 1 ảnh obj
+                num_bg = self.batch_size - 1
                 if obj_ptr >= len(obj_pool):
                     if self.drop_last:
                         return
@@ -298,33 +339,14 @@ class BalancedBatchSampler(torch.utils.data.sampler.Sampler):
                 batch.append(obj_pool[obj_ptr])
                 obj_ptr += 1
                 
-                # Lấy 1 bg
-                if bg_ptr >= len(bg_pool):
-                    if self.drop_last:
-                        return
-                    bg_ptr = 0
-                batch.append(bg_pool[bg_ptr])
-                bg_ptr += 1
-            
-            # Lấy phần dư nếu obj_per_batch != bg_per_batch
-            # Nếu obj nhiều hơn bg trong batch
-            for _ in range(self.obj_per_batch - min_pairs):
-                if obj_ptr >= len(obj_pool):
-                    if self.drop_last:
-                        return
-                    obj_ptr = 0
-                batch.append(obj_pool[obj_ptr])
-                obj_ptr += 1
-            
-            # Nếu bg nhiều hơn obj trong batch
-            for _ in range(self.bg_per_batch - min_pairs):
-                if bg_ptr >= len(bg_pool):
-                    if self.drop_last:
-                        return
-                    bg_ptr = 0
-                batch.append(bg_pool[bg_ptr])
-                bg_ptr += 1
-            
+                for _ in range(num_bg):
+                    if bg_ptr >= len(bg_pool):
+                        if self.drop_last:
+                            return
+                        bg_ptr = 0
+                    batch.append(bg_pool[bg_ptr])
+                    bg_ptr += 1
+                
             yield batch
     
     def __len__(self):

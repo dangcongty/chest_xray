@@ -13,6 +13,7 @@ import torch._dynamo
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
+from torchvision.ops import box_iou
 
 from ultralytics.nn.autobackend import check_class_names
 from ultralytics.nn.modules import (
@@ -420,6 +421,7 @@ class BaseModel(torch.nn.Module):
         
         # global_ct_losses = self.global_contrastive_loss(feats[0], abnormally_idx, nofinding_idx)
         local_ct_loss = self.local_contrastive_loss(batch, feats[1], mode = mode)
+        # local_ct_loss = torch.tensor([0], device=feats[0].device)
         global_ct_losses = torch.tensor([0], device=feats[0].device) # Mosaic gây lỗi
         # local_ct_loss = torch.tensor([0], device=feats[0].device) # TODO
 
@@ -439,10 +441,13 @@ class BaseModel(torch.nn.Module):
         bbox_xywh = batch['bboxes'] 
         H, W = feat.shape[2:]
         scale = torch.tensor([W, H, W, H], device=bbox_xywh.device)
-        
+        batchsize = batch['img'].shape[0]
 
         box_ids = batch['batch_idx'].view(-1, 1)
-        _class = batch['cls'].view(-1, 1)
+        num_boxes = len(box_ids)
+        if num_boxes == 0:
+            local_ct_loss = box_ids.new_tensor(0.0)
+
         # Convert xywh to xyxy
         _bbox_xywh = bbox_xywh.clone()
         bbox_xyxy = torch.zeros_like(bbox_xywh)
@@ -452,116 +457,87 @@ class BaseModel(torch.nn.Module):
         bbox_xyxy[:, 3] = _bbox_xywh[:, 1] + _bbox_xywh[:, 3]/2
         bbox_xyxy = bbox_xyxy * scale
         
-        # Prepare for ROI pooling [batch_idx, x1, y1, x2, y2]
+
+        if mode == 'train':
+            bbox_xyxy = torch.cat([bbox_xyxy,]*batchsize)
+            box_ids = torch.cat([box_ids,]*batchsize)
+            for i in range(1, batchsize):
+                box_ids[i*num_boxes:(i+1)*num_boxes] += i
+ 
         bbox_xyxy_with_ids = torch.cat([
-            batch['batch_idx'].view(-1, 1), 
+            box_ids.view(-1, 1), 
             bbox_xyxy
         ], dim=-1)
         
-        # No-finding Boxes
-        if mode == 'train':
-            nofinding_boxes_with_id = torch.tensor([], device=feat.device)
-            no_finding_class_pairs = torch.tensor([], device=feat.device)
-            img_size = batch['img'][0].shape[1]
-            for img_id, _batch in enumerate(batch['ct_boxes']):
-                if len(_batch):
-                    for ct_c in _batch:
-                        boxes = _batch[ct_c]
-                        boxes = scale * torch.tensor(boxes, device=feat.device)/img_size
-                        img_ids = torch.ones(boxes.shape[0], device = feat.device) * img_id
-                        nf_c = torch.ones(boxes.shape[0], device = feat.device) * ct_c
-                        boxes_with_id = torch.cat([img_ids.unsqueeze(-1), boxes], -1)
-                        
-                        if len(nofinding_boxes_with_id) == 0:
-                            nofinding_boxes_with_id = boxes_with_id
-                            no_finding_class_pairs = nf_c
-                        else:
-                            nofinding_boxes_with_id = torch.cat([nofinding_boxes_with_id, boxes_with_id])
-                            no_finding_class_pairs = torch.cat([no_finding_class_pairs, nf_c])
-            if len(nofinding_boxes_with_id):
-                roi_feats_nf = self.roi_crop_resize(
-                    features=feat,
-                    bboxes=nofinding_boxes_with_id,
-                    output_size=roi_size
-                )  # [N, C, roi_size, roi_size]
-                embeddings_nf = F.adaptive_avg_pool2d(roi_feats_nf, 1).squeeze(-1).squeeze(-1)  # [N, C]
-                embeddings_nf = F.normalize(embeddings_nf, dim=1)  # L2 normalize     
-
-
         # Extract ROI features
         roi_feats = self.roi_crop_resize(
             features=feat,
             bboxes=bbox_xyxy_with_ids,
             output_size=roi_size
-        )  # [N, C, roi_size, roi_size]
-        # SPPF
+        ) 
 
-
+        if mode == 'train':
+            nf_feats = roi_feats[num_boxes:]
+            nf_embeds = F.adaptive_avg_pool2d(nf_feats, 1).squeeze(-1).squeeze(-1)  # [N, C]
+            nf_embeds = F.normalize(nf_embeds, dim=1)  # L2 normalize
+        abn_feats = roi_feats[:num_boxes]
+        
         # Global average pooling and normalize
-        embeddings = F.adaptive_avg_pool2d(roi_feats, 1).squeeze(-1).squeeze(-1)  # [N, C]
-        embeddings = F.normalize(embeddings, dim=1)  # L2 normalize
+        abn_embeds = F.adaptive_avg_pool2d(abn_feats, 1).squeeze(-1).squeeze(-1)  # [N, C]
+        abn_embeds = F.normalize(abn_embeds, dim=1)  # L2 normalize
 
 
         # Compute similarity matrix
-        sim_matrix = torch.matmul(embeddings, embeddings.T)  # [N, N]
+        sim_matrix = torch.matmul(abn_embeds, abn_embeds.T)  # [N, N]
         
         # Create masks
-        N = embeddings.size(0)
-        device = embeddings.device
+        N = abn_embeds.size(0)
+        device = abn_embeds.device
         
         # Self-similarity mask
         self_mask = torch.eye(N, device=device, dtype=torch.bool)
-        
+
         # Same image mask
-        batch_idx = batch['batch_idx'].view(-1, 1)  # [N, 1]
-        same_image_mask = (batch_idx == batch_idx.T)  # [N, N]
-        
+        # batch_idx = batch['batch_idx'].view(-1, 1)  # [N, 1]
+        # same_image_mask = (batch_idx == batch_idx.T)  # [N, N]
+
+        # Region mask
+        threshold = 0.1  # Ngưỡng IoU, bạn có thể chỉnh
+        iou_matrix = box_iou(bbox_xyxy[:num_boxes], bbox_xyxy[:num_boxes])  # [N, N]
+        iou_mask = (iou_matrix > threshold)
+
         # Same class mask
         labels = batch['cls'].view(-1, 1)  # [N, 1]
         same_class_mask = (labels == labels.T)  # [N, N]
         
         # Positive pairs: same class AND different image
-        positive_mask = same_class_mask & (~same_image_mask) & (~self_mask)
+        positive_mask = same_class_mask & (~iou_mask) & (~self_mask)
         
         # Negative pairs: everything that's NOT positive (excluding self)
         negative_mask = (~positive_mask) & (~self_mask)
         
-        # Check if no positive pairs exist
-        num_positives = positive_mask.sum(1)
-        if num_positives.sum() == 0:
-            return torch.tensor(0.0, device=device, requires_grad=True)
-        
-        # Margin-based loss
-        # Positive: push similarity → 1
-        # Negative: push similarity < (1 - margin)
-        
         margin = 0.5
         
-        # Average positive similarity
-        pos_sum = (positive_mask * sim_matrix).sum()
-        positive = pos_sum / positive_mask.sum().clamp(min=1)
-        
-        # Average negative similarity
-        neg_sum = (negative_mask * sim_matrix).sum()
-        negative = neg_sum / negative_mask.sum().clamp(min=1)
-        
         # Loss components
-        pos_loss = (1 - positive)  # Want positive → 1
-        neg_loss = torch.clamp(negative - margin, min = 0)  # Want negative < 0.5 (if margin=0.5)
-
-        # sửa lại neg_loss <=
-        # Weighted sum
-        alpha = 2.0
-        if mode == 'train':
-            if len(nofinding_boxes_with_id):
-                nf_sim_matrix = torch.matmul(embeddings, embeddings_nf.T)  # [N, N]
-                nf_loss = torch.clamp(nf_sim_matrix - margin, min = 0).mean() 
-                nf = 10
-                local_ct_loss = pos_loss + alpha * neg_loss + nf * nf_loss
-            else:
-                local_ct_loss = pos_loss + alpha * neg_loss
+        if positive_mask.sum() > 0:
+            pos_loss = (1 - (positive_mask * sim_matrix)).sum() / positive_mask.sum()
         else:
-            local_ct_loss = pos_loss + alpha * neg_loss
+            pos_loss = abn_embeds.new_tensor(0.0)
+
+        if negative_mask.sum() > 0:
+            neg_loss = torch.clamp(negative_mask * sim_matrix - margin, min=0).sum() / negative_mask.sum()
+        else:
+            neg_loss = torch.tensor(0.0, device=abn_embeds.device)
+
+        # Weighted sum
+        neg = 2.0
+        if mode == 'train':
+            nf_sim_matrix = torch.matmul(abn_embeds, nf_embeds.T)  # [N, N]
+            nf_loss = torch.clamp(nf_sim_matrix - margin, min = 0).mean() 
+            nf = 10
+            local_ct_loss = pos_loss + neg * neg_loss + nf * nf_loss
+        else:
+            local_ct_loss = pos_loss + neg * neg_loss
     
         return local_ct_loss
 

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import math
+import os
 import random
 import time
 from copy import deepcopy
-from typing import Any
+from typing import Any, List
 
 import cv2
 import numpy as np
@@ -375,8 +376,64 @@ class BaseMixTransform:
         self.dataset = dataset
         self.pre_transform = pre_transform
         self.p = p
+        try:
+            self.bg_indices, self.obj_indices = self._scan_labels()
+        except Exception as e:
+            print(e)
 
-    def __call__(self, labels: dict[str, Any]) -> dict[str, Any]:
+    def _scan_labels(self):
+        """Quét các file label và phân loại thành bg/obj indices"""
+        bg_indices, obj_indices = [], []
+        invalid_count = 0
+        
+        for dataset_idx, img_path in enumerate(self.dataset.label_files):
+            # Chuyển đổi từ image path sang label path
+            label_path = img_path.replace('images', 'labels')
+            for ext in ['.png', '.jpg', '.jpeg', '.bmp', '.PNG', '.JPG', '.JPEG']:
+                label_path = label_path.replace(ext, '.txt')
+            
+            if not label_path.endswith('.txt'):
+                label_path += '.txt'
+            
+            # Kiểm tra file tồn tại
+            if not os.path.exists(label_path):
+                invalid_count += 1
+                continue
+            
+            # Kiểm tra valid (không có bbox âm hoặc > 1)
+            is_valid = True
+            if os.path.getsize(label_path) > 0:
+                try:
+                    with open(label_path, 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            parts = line.split()
+                            if len(parts) >= 5:
+                                x_c, y_c, w, h = map(float, parts[1:5])
+                                if w <= 0 or h <= 0 or w > 1 or h > 1:
+                                    is_valid = False
+                                    break
+                except Exception as e:
+                    is_valid = False
+            
+            if not is_valid:
+                invalid_count += 1
+                continue
+            
+            # Phân loại bg hoặc obj - SỬ DỤNG dataset_idx (index gốc)
+            if os.path.getsize(label_path) == 0:
+                bg_indices.append(dataset_idx)
+            else:
+                obj_indices.append(dataset_idx)
+        
+        if invalid_count > 0:
+            print(f"[WARNING] Bỏ qua {invalid_count} samples không hợp lệ")
+        
+        return bg_indices, obj_indices
+
+    def __call__(self, labels: dict[str, Any], orig: bool = False) -> dict[str, Any]:
         """
         Apply pre-processing transforms and cutmix/mixup/mosaic transforms to labels data.
 
@@ -396,10 +453,17 @@ class BaseMixTransform:
         if random.uniform(0, 1) > self.p:
             return labels
 
-        # Get index of one or three other images
-        indexes = self.get_indexes()
-        if isinstance(indexes, int):
-            indexes = [indexes]
+        
+        if orig:
+            # Get index of one or three other images
+            indexes = self.get_indexes()
+            if isinstance(indexes, int):
+                indexes = [indexes]
+        else:
+            if len(labels['cls']):
+                indexes = np.random.choice(self.obj_indices, size = (3))
+            else:
+                indexes = np.random.choice(self.bg_indices, size = (3))
 
         # Get images information will be used for Mosaic, CutMix or MixUp
         mix_labels = [self.dataset.get_image_and_label(i) for i in indexes]
@@ -552,6 +616,8 @@ class Mosaic(BaseMixTransform):
         self.border = (-imgsz // 2, -imgsz // 2)  # width, height
         self.n = n
         self.buffer_enabled = self.dataset.cache != "ram"
+        self.stored_mosaic = {}
+        self.batch_idx = 0
 
     def get_indexes(self):
         """
@@ -693,127 +759,92 @@ class Mosaic(BaseMixTransform):
         '''
 
         # mosaic
-        mosaic_labels = []
-        s = self.imgsz
-        yc, xc = (int(random.uniform(-x, 2 * s + x)) for x in self.border)  # mosaic center x, y
+        try:
+            mosaic_labels = []
+            s = self.imgsz
+            yc, xc = (int(random.uniform(-x, 2 * s + x)) for x in self.border)  # mosaic center x, y
 
-        # get abnormally regions
-        ct_boxes = {}
+            # get abnormally regions
 
-        all_labels = [labels] + [lb for lb in labels['mix_labels']]
-        is_bg = np.array([len(labels['cls'])] + [len(lb['cls']) for lb in labels['mix_labels']]) == 0
-        abn_labels = []
-        nf_labels = []
-        for k, _isbg in enumerate(is_bg):
-            if _isbg:
-                nf_labels.append(all_labels[k])
-            else:
-                abn_labels.append(all_labels[k])
-        
-        current_id = 0
-        origin_labels = []
-        for abn_label in abn_labels:
-            origin_labels.append(deepcopy(abn_label))
-            img = abn_label["img"]
-            h, w = abn_label.pop("resized_shape")
-            if current_id == 0:  # top left
-                img4 = np.full((s * 2, s * 2, img.shape[2]), 114, dtype=np.uint8)  # base image with 4 tiles
-                x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc  # xmin, ymin, xmax, ymax (large image)
-                x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h  # xmin, ymin, xmax, ymax (small image)
-            elif current_id == 1:  # top right
-                x1a, y1a, x2a, y2a = xc, max(yc - h, 0), min(xc + w, s * 2), yc
-                x1b, y1b, x2b, y2b = 0, h - (y2a - y1a), min(w, x2a - x1a), h
-            elif current_id == 2:  # bottom left
-                x1a, y1a, x2a, y2a = max(xc - w, 0), yc, xc, min(s * 2, yc + h)
-                x1b, y1b, x2b, y2b = w - (x2a - x1a), 0, w, min(y2a - y1a, h)
-            elif current_id == 3:  # bottom right
-                x1a, y1a, x2a, y2a = xc, yc, min(xc + w, s * 2), min(s * 2, yc + h)
-                x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(y2a - y1a, h)
+            all_labels = [labels] + [lb for lb in labels['mix_labels']]
+            
+            if self.batch_idx == 0:
+                current_id = 0
+                origin_labels = []
+                for abn_label in all_labels:
+                    origin_labels.append(deepcopy(abn_label))
+                    img = abn_label["img"]
+                    h, w = abn_label.pop("resized_shape")
+                    if current_id == 0:  # top left
+                        img4 = np.full((s * 2, s * 2, img.shape[2]), 114, dtype=np.uint8)  # base image with 4 tiles
+                        x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc  # xmin, ymin, xmax, ymax (large image)
+                        x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h  # xmin, ymin, xmax, ymax (small image)
+                    elif current_id == 1:  # top right
+                        x1a, y1a, x2a, y2a = xc, max(yc - h, 0), min(xc + w, s * 2), yc
+                        x1b, y1b, x2b, y2b = 0, h - (y2a - y1a), min(w, x2a - x1a), h
+                    elif current_id == 2:  # bottom left
+                        x1a, y1a, x2a, y2a = max(xc - w, 0), yc, xc, min(s * 2, yc + h)
+                        x1b, y1b, x2b, y2b = w - (x2a - x1a), 0, w, min(y2a - y1a, h)
+                    elif current_id == 3:  # bottom right
+                        x1a, y1a, x2a, y2a = xc, yc, min(xc + w, s * 2), min(s * 2, yc + h)
+                        x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(y2a - y1a, h)
 
-            img4[y1a:y2a, x1a:x2a] = img[y1b:y2b, x1b:x2b]  # img4[ymin:ymax, xmin:xmax]
-            padw = x1a - x1b
-            padh = y1a - y1b
+                    img4[y1a:y2a, x1a:x2a] = img[y1b:y2b, x1b:x2b]  # img4[ymin:ymax, xmin:xmax]
+                    padw = x1a - x1b
+                    padh = y1a - y1b
 
-            abn_label = self._update_labels(abn_label, padw, padh)
-            mosaic_labels.append(abn_label)
-            current_id += 1
-        
-        ct_boxes = {}
-        for nf_label in nf_labels:
-            img = nf_label["img"]
-            h, w = nf_label.pop("resized_shape")
-            if current_id == 0:  # top left
-                img4 = np.full((s * 2, s * 2, img.shape[2]), 114, dtype=np.uint8)  # base image with 4 tiles
-                x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc  # xmin, ymin, xmax, ymax (large image)
-                x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h  # xmin, ymin, xmax, ymax (small image)
-            elif current_id == 1:  # top right
-                x1a, y1a, x2a, y2a = xc, max(yc - h, 0), min(xc + w, s * 2), yc
-                x1b, y1b, x2b, y2b = 0, h - (y2a - y1a), min(w, x2a - x1a), h
-            elif current_id == 2:  # bottom left
-                x1a, y1a, x2a, y2a = max(xc - w, 0), yc, xc, min(s * 2, yc + h)
-                x1b, y1b, x2b, y2b = w - (x2a - x1a), 0, w, min(y2a - y1a, h)
-            elif current_id == 3:  # bottom right
-                x1a, y1a, x2a, y2a = xc, yc, min(xc + w, s * 2), min(s * 2, yc + h)
-                x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(y2a - y1a, h)
-            img4[y1a:y2a, x1a:x2a] = img[y1b:y2b, x1b:x2b]  # img4[ymin:ymax, xmin:xmax]
-            padw = x1a - x1b
-            padh = y1a - y1b
-            nf_label = self._update_labels(nf_label, padw, padh)
-            mosaic_labels.append(nf_label)
+                    abn_label = self._update_labels(abn_label, padw, padh)
+                    mosaic_labels.append(abn_label)
+                    
+                    self.stored_mosaic[current_id] = [xc, yc, h, w, padw, padh]
+                    current_id += 1
+            else:  
+                stored_mosaic = deepcopy(self.stored_mosaic)
+                for idx, mosaic_obj in stored_mosaic.items():
+                    xc, yc, h, w, padw, padh = mosaic_obj
+                    nf_label = all_labels[idx]
+                    img = nf_label["img"]
+                    # h, w = nf_label.pop("resized_shape")
+                    if idx == 0:  # top left
+                        img4 = np.full((s * 2, s * 2, img.shape[2]), 114, dtype=np.uint8)  # base image with 4 tiles
+                        x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc  # xmin, ymin, xmax, ymax (large image)
+                        x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h  # xmin, ymin, xmax, ymax (small image)
+                    elif idx == 1:  # top right
+                        x1a, y1a, x2a, y2a = xc, max(yc - h, 0), min(xc + w, s * 2), yc
+                        x1b, y1b, x2b, y2b = 0, h - (y2a - y1a), min(w, x2a - x1a), h
+                    elif idx == 2:  # bottom left
+                        x1a, y1a, x2a, y2a = max(xc - w, 0), yc, xc, min(s * 2, yc + h)
+                        x1b, y1b, x2b, y2b = w - (x2a - x1a), 0, w, min(y2a - y1a, h)
+                    elif idx == 3:  # bottom right
+                        x1a, y1a, x2a, y2a = xc, yc, min(xc + w, s * 2), min(s * 2, yc + h)
+                        x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(y2a - y1a, h)
+                    img4[y1a:y2a, x1a:x2a] = img[y1b:y2b, x1b:x2b]  # img4[ymin:ymax, xmin:xmax]
+                    nf_label = self._update_labels(nf_label, padw, padh)
+                    mosaic_labels.append(nf_label)
+                    
 
-            # Lấy box của ảnh abn đi map
-            for abn_label in origin_labels:
-                abn = deepcopy(abn_label)
-                abn = self._update_labels(abn, padw, padh)
+            # visualize
+            # if len(nf_labels) != 0 and False:
+            #     vis = img4.copy()
+            #     c1 = mosaic_labels[0]['cls'][0]
+            #     abn_box = mosaic_labels[0]['instances'].bboxes[0].copy().astype(int)
+            #     vis = cv2.rectangle(vis, abn_box[:2], abn_box[2:], (0, 0, 255), 2)
+            #     nf_boxes = ct_boxes[int(c1)]
+            #     for nf_box in nf_boxes:
+            #         nf_box = np.array(nf_box, dtype = int)
+            #         vis = cv2.rectangle(vis, nf_box[:2], nf_box[2:], (0, 255, 0), 2)
 
-                boxes = abn['instances'].bboxes
-                centers = np.stack([(boxes[:, 2] + boxes[:, 0])/2, (boxes[:, 3] + boxes[:, 1])/2]).T
-                dist_thresholds = np.sqrt((boxes[:, 2] - boxes[:, 0])**2 + (boxes[:, 3] - boxes[:, 1])**2)/2
-                boxsizes = np.stack([(boxes[:, 2] - boxes[:, 0]), (boxes[:, 3] - boxes[:, 1])]).T
-                
-                for c, box, center, dist, boxsize in zip(abn['cls'], boxes, centers, dist_thresholds, boxsizes):
-                    c = int(c)
-                    ct_boxes[c] = [] if c not in ct_boxes else ct_boxes[c]
-                    max_num_boxes = 2
-                    boxes_nf = []
-                    for _ in range(max_num_boxes):
-                        x_random, y_random = self.random_gaussian_point(center, dist)
-                        box_random = [x_random - boxsize[0]/2, y_random - boxsize[1]/2, x_random + boxsize[0]/2, y_random + boxsize[1]/2]
-                        boxes_nf.append(box_random)
-                    boxes_nf = np.stack(boxes_nf)
-                    boxes_nf[:, ::2] = np.clip(boxes_nf[:, ::2], x1a, x2a)
-                    boxes_nf[:, 1::2] = np.clip(boxes_nf[:, 1::2], y1a, y2a)
-                    ct_boxes[c] = ct_boxes[c] + boxes_nf.tolist()
+            final_labels = self._cat_labels(mosaic_labels, half=False)
+            final_labels["img"] = img4
 
-            current_id += 1
+            self.batch_idx += 1
+            if self.batch_idx == 4:
+                self.stored_mosaic = {}
+                self.batch_idx = 0
 
-        # visualize
-        if len(nf_labels) != 0 and False:
-            vis = img4.copy()
-            c1 = mosaic_labels[0]['cls'][0]
-            abn_box = mosaic_labels[0]['instances'].bboxes[0].copy().astype(int)
-            vis = cv2.rectangle(vis, abn_box[:2], abn_box[2:], (0, 0, 255), 2)
-            nf_boxes = ct_boxes[int(c1)]
-            for nf_box in nf_boxes:
-                nf_box = np.array(nf_box, dtype = int)
-                vis = cv2.rectangle(vis, nf_box[:2], nf_box[2:], (0, 255, 0), 2)
-
-        # scale = 0.5
-        # img4 = cv2.resize(img4, (s, s))
-
-        # # Scale lại các bounding boxes tương ứng
-        # for lb in mosaic_labels:
-        #     lb['instances'].scale(scale, scale, bbox_only = True)
-
-        # # Scale lại ct_boxes (nếu có)
-        # for c in ct_boxes:
-        #     ct_boxes[c] = [[x * scale for x in box] for box in ct_boxes[c]]
-
-        final_labels = self._cat_labels(mosaic_labels, half=False)
-        final_labels["img"] = img4
-        final_labels['ct_boxes'] = ct_boxes
-        final_labels['abn_nf_index'] = is_bg
-        return final_labels
+            return final_labels
+        except Exception as e:
+            print()
 
     @staticmethod
     def random_gaussian_point(center, R, k=1.5):
@@ -1245,6 +1276,7 @@ class RandomPerspective:
         self.perspective = perspective
         self.border = border  # mosaic border
         self.pre_transform = pre_transform
+        self.batch_idx = 0
 
     def affine_transform(self, img: np.ndarray, border: tuple[int, int]) -> tuple[np.ndarray, np.ndarray, float]:
         """
@@ -1449,7 +1481,7 @@ class RandomPerspective:
             >>> result = transform(labels)
             >>> assert result["img"].shape[:2] == result["resized_shape"]
         """
-        return labels
+
         if self.pre_transform and "mosaic_border" not in labels:
             labels = self.pre_transform(labels)
         labels.pop("ratio_pad", None)  # do not need ratio pad
@@ -1457,7 +1489,6 @@ class RandomPerspective:
         img = labels["img"]
         cls = labels["cls"]
         instances = labels.pop("instances")
-        ct_bboxes = labels.pop('ct_boxes')
 
         # Make sure the coord formats are right
         instances.convert_bbox(format="xyxy")
@@ -1467,39 +1498,28 @@ class RandomPerspective:
         self.size = img.shape[1] + border[1] * 2, img.shape[0] + border[0] * 2  # w, h
         # M is affine matrix
         # Scale for func:`box_candidates`
-        img, M, scale = self.affine_transform(img, border)
+        if self.batch_idx == 0:
+            img, self.M, self.scale = self.affine_transform(img, border)
+        else:
+            img = cv2.warpAffine(img, self.M[:2], dsize=self.size, borderValue=(114, 114, 114))
 
-        bboxes = self.apply_bboxes(instances.bboxes, M)
-        new_ct_bboxes = {}
-        for c in ct_bboxes:
-            _boxes = ct_bboxes[c]
-            _boxes = np.array(_boxes)
-            process_boxes = self.apply_bboxes(_boxes.copy(), M)
-            process_boxes = np.clip(process_boxes, 0, self.size[1])
-            process_boxes *= scale
-
-            # check
-            i_ct = self.box_candidates(
-                box1=_boxes.T, box2=process_boxes.T, area_thr=0.10
-            )
-            new_ct_bboxes[c] = process_boxes[i_ct].tolist()
-
+        bboxes = self.apply_bboxes(instances.bboxes, self.M)
 
         segments = instances.segments
         keypoints = instances.keypoints
         # Update bboxes if there are segments.
         if len(segments):
-            bboxes, segments = self.apply_segments(segments, M)
+            bboxes, segments = self.apply_segments(segments, self.M)
 
         if keypoints is not None:
-            keypoints = self.apply_keypoints(keypoints, M)
+            keypoints = self.apply_keypoints(keypoints, self.M)
         new_instances = Instances(bboxes, segments, keypoints, bbox_format="xyxy", normalized=False)
         # Clip
         new_instances.clip(*self.size)
 
         # Filter instances
         instances: Instances
-        instances.scale(scale_w=scale, scale_h=scale, bbox_only=True)
+        instances.scale(scale_w=self.scale, scale_h=self.scale, bbox_only=True)
         # Make the bboxes have the same scale with new_bboxes
         i = self.box_candidates(
             box1=instances.bboxes.T, box2=new_instances.bboxes.T, area_thr=0.01 if len(segments) else 0.10
@@ -1508,7 +1528,10 @@ class RandomPerspective:
         labels["cls"] = cls[i]
         labels["img"] = img
         labels["resized_shape"] = img.shape[:2]
-        labels["ct_boxes"] = new_ct_bboxes
+
+        self.batch_idx += 1
+        if self.batch_idx == 4:
+            self.batch_idx = 0
 
         # vis 
         # if len(labels["ct_boxes"]):
@@ -1700,6 +1723,7 @@ class RandomFlip:
         self.p = p
         self.direction = direction
         self.flip_idx = flip_idx
+        self.batch_idx = 0
 
     def __call__(self, labels: dict[str, Any]) -> dict[str, Any]:
         """
@@ -1739,37 +1763,25 @@ class RandomFlip:
             if self.flip_idx is not None and instances.keypoints is not None:
                 instances.keypoints = np.ascontiguousarray(instances.keypoints[:, self.flip_idx, :])
         if self.direction == "horizontal" and random.random() < self.p:
+            if self.batch_idx == 0:
+                img = np.fliplr(img)
+                instances.fliplr(w)
+                if self.flip_idx is not None and instances.keypoints is not None:
+                    instances.keypoints = np.ascontiguousarray(instances.keypoints[:, self.flip_idx, :])
+                self.flip = True
+
+        if self.batch_idx != 0 and hasattr(self, 'flip'):
             img = np.fliplr(img)
             instances.fliplr(w)
-            if self.flip_idx is not None and instances.keypoints is not None:
-                instances.keypoints = np.ascontiguousarray(instances.keypoints[:, self.flip_idx, :])
 
-            # flip nofinding boxes
-            ct_boxes = labels.pop('ct_boxes')
-            new_ct_boxes = {}
-            for c in ct_boxes:
-                boxes = np.array(ct_boxes[c])
-                x1 = boxes[:, 0].copy()
-                x2 = boxes[:, 2].copy()
-                boxes[:, 0] = w - x2
-                boxes[:, 2] = w - x1
-                # boxes[:, ::2] = w - boxes[:, ::2]
-                new_ct_boxes[c] = boxes.tolist()
-            labels['ct_boxes'] = new_ct_boxes
-
-            if len(new_ct_boxes) and False:
-                vis = img.copy()
-                c1 = labels['cls'][0]
-                abn_box = labels['instances'].bboxes[0].copy().astype(int)
-                abn_boxx, abn_boxy, abn_boxw, abn_boxh = abn_box
-                vis = cv2.rectangle(vis, [abn_boxx - abn_boxw//2, abn_boxy - abn_boxh//2], [abn_boxx + abn_boxw//2, abn_boxy + abn_boxh//2], (0, 0, 255), 2)
-                nf_boxes = new_ct_boxes[int(c1)]
-                for nf_box in nf_boxes:
-                    nf_box = np.array(nf_box, dtype = int)
-                    vis = cv2.rectangle(vis, nf_box[:2], nf_box[2:], (0, 255, 0), 2)
 
         labels["img"] = np.ascontiguousarray(img)
         labels["instances"] = instances
+
+        self.batch_idx += 1
+        if self.batch_idx == 4:
+            self.batch_idx = 0
+
         return labels
 
 
@@ -3171,4 +3183,5 @@ class ToTensor:
         im = torch.from_numpy(im)  # to torch
         im = im.half() if self.half else im.float()  # uint8 to fp16/32
         im /= 255.0  # 0-255 to 0.0-1.0
+        return im
         return im

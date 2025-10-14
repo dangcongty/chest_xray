@@ -26,7 +26,8 @@
 => Ở bước mosaic, có thông tin của 4 ảnh => map vùng có bệnh sang các hình khác. Điều kiện là các vùng sample ko phải cùng loại bệnh
 ==== Mosaic: Trước khi mosaic sẽ sample box từ các ảnh trong ảnh mosaic
 
-9. resize về 640 ko ngon => tạo thêm loader cho background
+9. resize về 640 ko ngon => tạo thêm loader cho background => Cho batch-1 ảnh có object và 1 ảnh background, sau đó map các box từ ảnh obj sang bg
+
 
 ################################################################3
 
