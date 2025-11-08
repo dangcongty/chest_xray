@@ -10,13 +10,7 @@ import torch.nn.functional as F
 
 from ultralytics.utils.metrics import OKS_SIGMA
 from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
-from ultralytics.utils.tal import (
-    RotatedTaskAlignedAssigner,
-    TaskAlignedAssigner,
-    dist2bbox,
-    dist2rbox,
-    make_anchors,
-)
+from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
 from .metrics import bbox_iou, probiou
@@ -198,60 +192,6 @@ class KeypointLoss(nn.Module):
         e = d / ((2 * self.sigmas).pow(2) * (area + 1e-9) * 2)  # from cocoeval
         return (kpt_loss_factor.view(-1, 1) * ((1 - torch.exp(-e)) * kpt_mask)).mean()
 
-class FocalLoss(nn.Module):
-    """Focal Loss wrapper for BCEWithLogitsLoss."""
-    def __init__(self, alpha=0.25, gamma=2.0, reduction='none'):
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, pred, target):
-        pred_sigmoid = torch.sigmoid(pred)
-        pt = pred_sigmoid * target + (1 - pred_sigmoid) * (1 - target)  # p_t
-        focal_weight = (self.alpha * target + (1 - self.alpha) * (1 - target)) * (1 - pt).pow(self.gamma)
-        bce_loss = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
-        loss = focal_weight * bce_loss
-
-        if self.reduction == 'mean':
-            return loss.mean()
-        elif self.reduction == 'sum':
-            return loss.sum()
-        else:
-            return loss
-
-
-class VarifocalLoss(nn.Module):
-    """
-    Varifocal Loss from VFNet paper:
-    https://arxiv.org/abs/2008.13367
-    Compatible with soft targets from TaskAlignedAssigner.
-    """
-    def __init__(self, alpha=0.75, gamma=2.0, reduction='mean'):
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, pred, target):
-        """
-        Args:
-            pred: Tensor of shape [N, num_classes] - logits (not sigmoid)
-            target: Tensor of shape [N, num_classes] - soft targets from assigner
-        """
-        pred_sigmoid = torch.sigmoid(pred)
-        # Focal weight differs for positive vs negative samples
-        focal_weight = target * (target > 0.0).float() + \
-                       self.alpha * (pred_sigmoid - target).abs().pow(self.gamma) * (target <= 0.0).float()
-
-        loss = F.binary_cross_entropy_with_logits(pred, target, reduction='none') * focal_weight
-
-        if self.reduction == 'mean':
-            return loss.mean()
-        elif self.reduction == 'sum':
-            return loss.sum()
-        else:
-            return loss
 
 class v8DetectionLoss:
     """Criterion class for computing training losses for YOLOv8 object detection."""
@@ -263,8 +203,6 @@ class v8DetectionLoss:
 
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
-        self.cls_loss_fn = FocalLoss(alpha=0.25, gamma=2.0, reduction="none")
-        self.varifocal_loss = VarifocalLoss(alpha=0.75, gamma=2.0, reduction="none")
         self.hyp = h
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
@@ -344,9 +282,8 @@ class v8DetectionLoss:
         target_scores_sum = max(target_scores.sum(), 1)
 
         # Cls loss
-        loss[1] = self.varifocal_loss(pred_scores, target_scores).sum() / target_scores_sum  # VFL way
-        # loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
-        # loss[1] = self.cls_loss_fn(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum
+        # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
+        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
 
         # Bbox loss
         if fg_mask.sum():

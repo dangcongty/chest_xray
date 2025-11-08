@@ -52,6 +52,8 @@ __all__ = (
     "PSA",
     "SCDown",
     "TorchVision",
+    "ModifiedConv",
+    "C3k2CBAM"
 )
 
 
@@ -2029,3 +2031,191 @@ class SAVPE(nn.Module):
         aggregated = score.transpose(-2, -3) @ x.reshape(B, self.c, C // self.c, -1).transpose(-1, -2)
 
         return F.normalize(aggregated.transpose(-2, -3).reshape(B, Q, -1), dim=-1, p=2)
+
+
+class ModifiedConv(nn.Module):
+    """
+    Standard convolution module with batch normalization and activation.
+
+    Attributes:
+        conv (nn.Conv2d): Convolutional layer.
+        bn (nn.BatchNorm2d): Batch normalization layer.
+        act (nn.Module): Activation function layer.
+        default_act (nn.Module): Default activation function (SiLU).
+    """
+
+    default_act = nn.SiLU()  # default activation
+
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
+        """
+        Initialize Conv layer with given parameters.
+
+        Args:
+            c1 (int): Number of input channels.
+            c2 (int): Number of output channels.
+            k (int): Kernel size.
+            s (int): Stride.
+            p (int, optional): Padding.
+            g (int): Groups.
+            d (int): Dilation.
+            act (bool | nn.Module): Activation function.
+        """
+        super().__init__()
+        self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, bias=False)
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+
+        self.depthwise = nn.Conv2d(c1, c2, k, s, autopad(k, p, d), groups=c1, dilation=d, bias=False)
+        self.bn2 = nn.BatchNorm2d(c2)
+        self.reduce = nn.Conv2d(2 * c2, c2, 1, 1, 0, bias=False)
+
+    def channel_shuffle(self, x, groups=2):
+        """
+        Channel shuffle để trộn kênh giữa 2 nhánh.
+        """
+        batchsize, num_channels, height, width = x.size()
+        channels_per_group = num_channels // groups
+
+        # reshape -> (batch, groups, channels_per_group, H, W)
+        x = x.view(batchsize, groups, channels_per_group, height, width)
+        x = x.transpose(1, 2).contiguous()
+        x = x.view(batchsize, -1, height, width)
+        return x
+    
+    def forward(self, x):
+        """
+        Apply convolution, batch normalization and activation to input tensor.
+
+        Args:
+            x (torch.Tensor): Input tensor.
+
+        Returns:
+            (torch.Tensor): Output tensor.
+        """
+        branch_1 = self.act(self.bn(self.conv(x)))
+        branch_2 = self.act(self.bn2(self.depthwise(x)))
+        out = torch.cat((branch_1, branch_2), dim=1)
+        out = self.channel_shuffle(out, groups=2)
+        return self.reduce(out)
+
+
+class ChannelAttention(nn.Module):
+    def __init__(self, in_channels, reduction=4):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+
+        self.fc = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels // reduction, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels // reduction, in_channels, 1, bias=False)
+        )
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        # Avg Pool và Max Pool theo channel
+        avg_out = self.fc(self.avg_pool(x))
+        max_out = self.fc(self.max_pool(x))
+        out = avg_out + max_out
+        return self.sigmoid(out)
+
+
+# -----------------------------
+# Spatial Attention
+# -----------------------------
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+        assert kernel_size in (3, 7), 'kernel size must be 3 or 7'
+        padding = 3 if kernel_size == 7 else 1
+
+        self.conv = nn.Conv2d(2, 1, kernel_size, padding=padding, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        # Max + Avg Pool theo channel -> concat
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        x = torch.cat([avg_out, max_out], dim=1)
+        x = self.conv(x)
+        return self.sigmoid(x)
+
+
+# -----------------------------
+# CBAM (Channel + Spatial Attention)
+# -----------------------------
+class CBAM(nn.Module):
+    def __init__(self, in_channels, reduction=16, kernel_size=7):
+        super(CBAM, self).__init__()
+        self.channel_attention = ChannelAttention(in_channels, reduction)
+        self.spatial_attention = SpatialAttention(kernel_size)
+
+    def forward(self, x):
+        # Channel Attention
+        ca = self.channel_attention(x)
+        x = x * ca
+
+        # Spatial Attention
+        sa = self.spatial_attention(x)
+        x = x * sa
+
+        return x
+
+
+class C2fCBAM(nn.Module):
+    """Faster Implementation of CSP Bottleneck with 2 convolutions."""
+
+    def __init__(self, c1: int, c2: int, n: int = 1, shortcut: bool = False, g: int = 1, e: float = 0.5):
+        """
+        Initialize a CSP bottleneck with 2 convolutions.
+
+        Args:
+            c1 (int): Input channels.
+            c2 (int): Output channels.
+            n (int): Number of Bottleneck blocks.
+            shortcut (bool): Whether to use shortcut connections.
+            g (int): Groups for convolutions.
+            e (float): Expansion ratio.
+        """
+        super().__init__()
+        self.c = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
+        self.cv2 = Conv((2 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
+        self.m = nn.ModuleList(Bottleneck(self.c, self.c, shortcut, g, k=((3, 3), (3, 3)), e=1.0) for _ in range(n))
+        self.attn = CBAM(c2)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through C2f layer."""
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        return self.attn(self.cv2(torch.cat(y, 1)))
+
+    def forward_split(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass using split() instead of chunk()."""
+        y = self.cv1(x).split((self.c, self.c), 1)
+        y = [y[0], y[1]]
+        y.extend(m(y[-1]) for m in self.m)
+        return self.cv2(torch.cat(y, 1))
+
+class C3k2CBAM(C2fCBAM):
+    def __init__(
+        self, c1: int, c2: int, n: int = 1, c3k: bool = False, e: float = 0.5, g: int = 1, shortcut: bool = True
+    ):
+        """
+        Initialize C3k2CBAM module.
+
+        Args:
+            c1 (int): Input channels.
+            c2 (int): Output channels.
+            n (int): Number of blocks.
+            c3k (bool): Whether to use C3k blocks.
+            e (float): Expansion ratio.
+            g (int): Groups for convolutions.
+            shortcut (bool): Whether to use shortcut connections.
+        """
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(
+            C3k(self.c, self.c, 2, shortcut, g) if c3k else Bottleneck(self.c, self.c, shortcut, g) for _ in range(n)
+        )
+
+

@@ -36,12 +36,7 @@ from ultralytics.nn.autobackend import AutoBackend
 from ultralytics.utils import LOGGER, TQDM, callbacks, colorstr, emojis
 from ultralytics.utils.checks import check_imgsz
 from ultralytics.utils.ops import Profile
-from ultralytics.utils.torch_utils import (
-    attempt_compile,
-    select_device,
-    smart_inference_mode,
-    unwrap_model,
-)
+from ultralytics.utils.torch_utils import attempt_compile, select_device, smart_inference_mode, unwrap_model
 
 
 class BaseValidator:
@@ -165,7 +160,7 @@ class BaseValidator:
             callbacks.add_integration_callbacks(self)
             model = AutoBackend(
                 model=model or self.args.model,
-                device=select_device(self.args.device, self.args.batch),
+                device=select_device(self.args.device),
                 dnn=self.args.dnn,
                 data=self.args.data,
                 fp16=self.args.half,
@@ -216,17 +211,12 @@ class BaseValidator:
 
             # Inference
             with dt[1]:
-                preds, feats = model(batch["img"], augment=augment)
+                preds = model(batch["img"], augment=augment)
 
             # Loss
             with dt[2]:
                 if self.training:
-                    yolo_loss, ct_losses = model.loss(batch, preds, feats, mode='val')
-                    self.loss += yolo_loss[1]
-
-                    # contrastive
-                    global_ct_loss, local_ct_loss = ct_losses
-                    trainer.ct_loss_trackers.append(global_ct_loss, local_ct_loss, mode='val')
+                    self.loss += model.loss(batch, preds)[1]
 
             # Postprocess
             with dt[3]:
@@ -238,12 +228,6 @@ class BaseValidator:
                 self.plot_predictions(batch, preds, batch_i)
 
             self.run_callbacks("on_val_batch_end")
-        
-
-        # contrastive 
-        if self.training:
-            trainer.ct_loss_trackers.add_scalar(trainer.epoch, mode = 'val')
-
         stats = self.get_stats()
         self.speed = dict(zip(self.speed.keys(), (x.t / len(self.dataloader.dataset) * 1e3 for x in dt)))
         self.finalize_metrics()

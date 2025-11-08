@@ -36,8 +36,8 @@ def load_dataset(list_file):
 
 os.makedirs('datasets/train_val_statistic', exist_ok=True)
 
-train_stats = load_dataset("datasets/process/train.txt")
-val_stats   = load_dataset("datasets/process/val.txt")
+train_stats = load_dataset("datasets/process/train_1k_bg.txt")
+val_stats   = load_dataset("datasets/process/val_1k_bg.txt")
 
 # ---- 1. Class distribution (bar chart chung) ----
 train_classes, train_counts = np.unique(train_stats["classes"], return_counts=True)

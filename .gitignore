@@ -17,3 +17,7 @@ runs/
 *.pt
 .vscode/
 lung_seg/
+*.png
+ckpt/
+*.txt
+*.json

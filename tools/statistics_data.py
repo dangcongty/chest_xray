@@ -6,8 +6,8 @@ import numpy as np
 from matplotlib.patches import Patch
 
 
-def class_distribute():
-    label_paths = glob('datasets/process/labels/*.txt')
+def class_distribute(path='datasets/process/labels/*.txt'):
+    label_paths = glob(path)
 
     class_dist = {i: 0 for i in range(14)}
     for path in label_paths:
@@ -48,15 +48,15 @@ def class_distribute():
          bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
     plt.tight_layout()
-    plt.savefig('datasets/after_process.jpg')
+    plt.savefig('datasets/after_process_test.jpg')
 
 
-def box_size(plot=False, save_outliers=True):
+def box_size(plot=False, save_outliers=True, path = 'datasets/process/labels/*'):
     stats_w = {i: [] for i in range(14)}
     stats_h = {i: [] for i in range(14)}
     
     # Thu thập dữ liệu
-    for txt_path in glob('datasets/process/labels/*'):
+    for txt_path in glob(path):
         with open(txt_path, 'r') as f:
             data = f.readlines()
     
@@ -110,11 +110,11 @@ def box_size(plot=False, save_outliers=True):
                     all_outlier_paths.add(path)
         
         # Ghi ra file TXT (mỗi dòng một path)
-        with open('datasets/outliers.txt', 'w', encoding='utf-8') as f:
+        with open('datasets/outliers_test.txt', 'w', encoding='utf-8') as f:
             for path in sorted(all_outlier_paths):
                 f.write(f"{path}\n")
         
-        print(f"✓ Outliers saved to: datasets/outliers.txt")
+        print(f"✓ Outliers saved to: datasets/outliers_test.txt")
         print(f"  Total outlier files: {len(all_outlier_paths)}")
     
     # Chuẩn bị data cho plot
@@ -197,16 +197,16 @@ def box_size(plot=False, save_outliers=True):
                 fancybox=True, shadow=True, ncol=2)
 
         plt.tight_layout()
-        plt.savefig("datasets/box_size_chart.jpg", dpi=300)
+        plt.savefig("datasets/box_size_chart_test.jpg", dpi=300)
         print(f"✓ Chart saved to: datasets/box_size_chart.jpg")
     
     # Trả về stats dạng cũ
     return {c: [item[0] for item in stats_w[c]] for c in range(14)}, \
            {c: [item[0] for item in stats_h[c]] for c in range(14)}
 
-def box_pos(plot = False):
+def box_pos(plot = False, path =  'datasets/process/labels/*'):
     stats_center = {i: [] for i in range(14)}
-    for txt_path in glob('datasets/process/labels/*'):
+    for txt_path in glob(path):
         with open(txt_path, 'r') as f:
             data = f.readlines()
     
@@ -226,7 +226,7 @@ def box_pos(plot = False):
         stats_center = defaultdict(list)
 
         # Đọc dữ liệu YOLO
-        for txt_path in glob('datasets/process/labels/*.txt'):
+        for txt_path in glob(path):
             with open(txt_path, 'r') as f:
                 data = f.readlines()
             for dt in data:
@@ -259,7 +259,7 @@ def box_pos(plot = False):
             plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=15, markerscale = 2)
             plt.grid(True, linestyle="--", alpha=0.5)
             plt.tight_layout()
-            plt.savefig("datasets/box_position_all_classes_chart.jpg", dpi=300, bbox_inches="tight")
+            plt.savefig("datasets/box_position_all_classes_chart_test.jpg", dpi=300, bbox_inches="tight")
 
             # -------- Chart riêng từng class --------
             cols = 4  # số cột trong subplot
@@ -287,7 +287,7 @@ def box_pos(plot = False):
 
             plt.suptitle("Phân bố vị trí box theo từng class", fontsize=18, weight="bold")
             plt.tight_layout(rect=[0, 0, 1, 0.97])
-            plt.savefig("datasets/box_position_per_class_chart.jpg", dpi=300)
+            plt.savefig("datasets/box_position_per_class_chart_test.jpg", dpi=300)
 
     return stats_center
 
@@ -369,5 +369,6 @@ def box_co_occurrence():
 
 
 if __name__ == '__main__':
-    # class_distribute()
-    box_size(save_outliers=True)
+    class_distribute(path = '/media/hoangtv/0f9d3910-0ff9-406c-92e1-c2c8170ca6f42/Ty/vindr_cxr/labels/*.txt')
+    box_size(plot=True, save_outliers=True, path='/media/hoangtv/0f9d3910-0ff9-406c-92e1-c2c8170ca6f42/Ty/vindr_cxr/labels/*.txt')
+    box_pos(plot=True, path='/media/hoangtv/0f9d3910-0ff9-406c-92e1-c2c8170ca6f42/Ty/vindr_cxr/labels/*.txt')

@@ -53,8 +53,6 @@ class DetectionPredictor(BasePredictor):
             >>> processed_results = predictor.postprocess(preds, img, orig_imgs)
         """
         save_feats = getattr(self, "_feats", None) is not None
-        if isinstance(preds, (list, tuple)):
-            preds = preds[0]
         preds = nms.non_max_suppression(
             preds,
             self.args.conf,

@@ -39,3 +39,12 @@ Thêm conf-aware vào dataloader
 1. Augmentation: Có nên fliplr, scale ko?
 
 
+
+
+
+##############################
+
+mạng sub học toàn dữ liệu và học theo model gốc 
+=> feature banks 
+=> mong muốn là các hard sample tiến về các cụm mong muốn
+=> Vẽ ()

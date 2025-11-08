@@ -66,7 +66,7 @@ class YOLODatasetSplitter:
         
         # Tìm tất cả ảnh
         image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
-        limit_bg = 3000
+        limit_bg = 0
         num_bg = 0
         num_obj = 0
         for img_path in images_dir.iterdir():
@@ -263,11 +263,11 @@ class YOLODatasetSplitter:
                             train_class_count, val_class_count)
         
 
-        with open('datasets/process/train_3k_bg.txt', 'w') as f:
+        with open('datasets/process/train_0k_bg.txt', 'w') as f:
             for name in train_imgs:
                 path = f'datasets/process/images/{name}'
                 f.write(f'{path}\n')
-        with open('datasets/process/val_3k_bg.txt', 'w') as f:
+        with open('datasets/process/val_0k_bg.txt', 'w') as f:
             for name in val_imgs:
                 path = f'datasets/process/images/{name}'
                 f.write(f'{path}\n')
