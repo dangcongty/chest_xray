@@ -2,26 +2,22 @@
 
 from __future__ import annotations
 
+import math
 import os
 import random
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, List
+from typing import Any
 from urllib.parse import urlsplit
 
 import numpy as np
 import torch
-import torch.utils.data.sampler
+import torch.distributed as dist
 from PIL import Image
-from torch.utils.data import dataloader, distributed
+from torch.utils.data import Dataset, dataloader, distributed
 
 from ultralytics.cfg import IterableSimpleNamespace
-from ultralytics.data.dataset import (
-    GroundingDataset,
-    YOLOConfidenceAwareDataset,
-    YOLODataset,
-    YOLOMultiModalDataset,
-)
+from ultralytics.data.dataset import GroundingDataset, YOLODataset, YOLOMultiModalDataset
 from ultralytics.data.loaders import (
     LOADERS,
     LoadImagesAndVideos,
@@ -39,8 +35,7 @@ from ultralytics.utils.torch_utils import TORCH_2_0
 
 
 class InfiniteDataLoader(dataloader.DataLoader):
-    """
-    Dataloader that reuses workers for infinite iteration.
+    """Dataloader that reuses workers for infinite iteration.
 
     This dataloader extends the PyTorch DataLoader to provide infinite recycling of workers, which improves efficiency
     for training loops that need to iterate through the dataset multiple times without recreating workers.
@@ -67,31 +62,8 @@ class InfiniteDataLoader(dataloader.DataLoader):
         """Initialize the InfiniteDataLoader with the same arguments as DataLoader."""
         if not TORCH_2_0:
             kwargs.pop("prefetch_factor", None)  # not supported by earlier versions
-
-        if kwargs['mode'] == 'val':
-            kwargs.pop('mode')
-            super().__init__(*args, **kwargs)
-            object.__setattr__(self, "batch_sampler", _RepeatSampler(self.batch_sampler))
-        else:
-            # Tạo balanced batch sampler
-            batch_sampler = BalancedBatchSampler(
-                batch_size=kwargs['batch_size'],
-                drop_last=kwargs.get('drop_last', True),
-                shuffle=kwargs.get('shuffle', True),
-                bg_ratio=0.5,  # Có thể điều chỉnh: 0.3, 0.4, 0.5
-                label_files=kwargs['dataset'].label_files
-            )
-            # Wrap với RepeatSampler cho infinite iteration
-            repeat_sampler = _RepeatSampler(batch_sampler)
-            # Khởi tạo DataLoader với batch_sampler
-            kwargs.pop('mode')
-            kwargs.pop('batch_size')
-            kwargs.pop('drop_last')
-            kwargs.pop('shuffle')
-            super().__init__(
-                batch_sampler=repeat_sampler,
-                **kwargs
-            )
+        super().__init__(*args, **kwargs)
+        object.__setattr__(self, "batch_sampler", _RepeatSampler(self.batch_sampler))
         self.iterator = super().__iter__()
 
     def __len__(self) -> int:
@@ -119,247 +91,12 @@ class InfiniteDataLoader(dataloader.DataLoader):
         """Reset the iterator to allow modifications to the dataset during training."""
         self.iterator = self._get_iterator()
 
-class BalancedBatchSampler(torch.utils.data.sampler.Sampler):
-    """
-    BatchSampler cân bằng 2 class với tỷ lệ bất đối xứng (vd: 1:15).
-    
-    Chiến lược:
-    - Mỗi batch có tỷ lệ bg:obj = 50:50 (hoặc tùy chỉnh)
-    - Class thiểu số được oversample (lặp lại)
-    - Class đa số được sử dụng đầy đủ qua các epoch
-    
-    Args:
-        batch_size: kích thước batch
-        drop_last: bỏ batch cuối nếu không đủ samples
-        shuffle: có shuffle indices không
-        bg_ratio: tỷ lệ background trong batch (0.5 = 50%)
-        label_files: list các đường dẫn image từ train.txt
-        max_oversample_ratio: giới hạn tỷ lệ oversample (vd: 2.0 = lặp tối đa 2 lần)
-    """
-    
-    def __init__(self, batch_size, drop_last=True, shuffle=True, bg_ratio=0.5, label_files=[], max_oversample_ratio=None):
-        self.batch_size = batch_size
-        self.drop_last = drop_last
-        self.shuffle = shuffle
-        self.bg_ratio = bg_ratio
-        self.label_files = label_files
-        self.max_oversample_ratio = max_oversample_ratio
-        
-        # Tính số samples mỗi class trong 1 batch
-        self.bg_per_batch = int(batch_size * bg_ratio)
-        self.obj_per_batch = batch_size - self.bg_per_batch
-        
-        # Scan và phân loại indices
-        self.bg_indices, self.obj_indices = self._scan_labels()
-        
-        print(f"[INFO] Found {len(self.bg_indices)} background samples")
-        print(f"[INFO] Found {len(self.obj_indices)} object samples")
-        print(f"[INFO] Ratio bg:obj = 1:{len(self.obj_indices)/max(len(self.bg_indices), 1):.1f}")
-        print(f"[INFO] Each batch: {self.bg_per_batch} bg + {self.obj_per_batch} obj")
-        
-        # Tính số batch dựa trên class có NHIỀU samples hơn
-        if len(self.bg_indices) > len(self.obj_indices):
-            # Background là đa số
-            max_bg_batches = len(self.bg_indices) // self.bg_per_batch if self.bg_per_batch > 0 else 0
-            
-            # Giới hạn oversample nếu cần
-            if self.max_oversample_ratio and self.obj_per_batch > 0:
-                max_allowed = int(len(self.obj_indices) * self.max_oversample_ratio / self.obj_per_batch)
-                self.num_batches = min(max_bg_batches, max_allowed)
-            else:
-                self.num_batches = max_bg_batches
-        else:
-            # Object là đa số
-            max_obj_batches = len(self.obj_indices) // self.obj_per_batch if self.obj_per_batch > 0 else 0
-            
-            # Giới hạn oversample nếu cần
-            if self.max_oversample_ratio and self.bg_per_batch > 0:
-                max_allowed = int(len(self.bg_indices) * self.max_oversample_ratio / self.bg_per_batch)
-                self.num_batches = min(max_obj_batches, max_allowed)
-            else:
-                self.num_batches = max_obj_batches
-        
-        # Tính tỷ lệ oversample thực tế
-        minority_class = "obj" if len(self.bg_indices) > len(self.obj_indices) else "bg"
-        minority_size = min(len(self.bg_indices), len(self.obj_indices))
-        minority_per_batch = self.obj_per_batch if minority_class == "obj" else self.bg_per_batch
-        actual_oversample = (self.num_batches * minority_per_batch) / minority_size if minority_size > 0 else 0
-        
-        print(f"[INFO] Total batches per epoch: {self.num_batches}")
-        print(f"[INFO] Class {minority_class} (thiểu số) sẽ được oversample {actual_oversample:.2f}x")
-    
-    def _scan_labels(self):
-        """Quét các file label và phân loại thành bg/obj indices"""
-        bg_indices, obj_indices = [], []
-        invalid_count = 0
-        
-        for dataset_idx, img_path in enumerate(self.label_files):
-            # Chuyển đổi từ image path sang label path
-            label_path = img_path.replace('images', 'labels')
-            for ext in ['.png', '.jpg', '.jpeg', '.bmp', '.PNG', '.JPG', '.JPEG']:
-                label_path = label_path.replace(ext, '.txt')
-            
-            if not label_path.endswith('.txt'):
-                label_path += '.txt'
-            
-            # Kiểm tra file tồn tại
-            if not os.path.exists(label_path):
-                invalid_count += 1
-                continue
-            
-            # Kiểm tra valid (không có bbox âm hoặc > 1)
-            is_valid = True
-            if os.path.getsize(label_path) > 0:
-                try:
-                    with open(label_path, 'r') as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            parts = line.split()
-                            if len(parts) >= 5:
-                                x_c, y_c, w, h = map(float, parts[1:5])
-                                if w <= 0 or h <= 0 or w > 1 or h > 1:
-                                    is_valid = False
-                                    break
-                except Exception as e:
-                    is_valid = False
-            
-            if not is_valid:
-                invalid_count += 1
-                continue
-            
-            # Phân loại bg hoặc obj - SỬ DỤNG dataset_idx (index gốc)
-            if os.path.getsize(label_path) == 0:
-                bg_indices.append(dataset_idx)
-            else:
-                obj_indices.append(dataset_idx)
-        
-        if invalid_count > 0:
-            print(f"[WARNING] Bỏ qua {invalid_count} samples không hợp lệ")
-        
-        return bg_indices, obj_indices
-    
-    def __iter__(self) -> Iterator[List[int]]:
-        """Tạo các batch cân bằng với oversample class thiểu số"""
-        # Xác định class nào là thiểu số
-        is_bg_minority = len(self.bg_indices) < len(self.obj_indices)
-        
-        # Tạo pools
-        bg_pool = self.bg_indices.copy()
-        obj_pool = self.obj_indices.copy()
-        
-        if self.shuffle:
-            random.shuffle(bg_pool)
-            random.shuffle(obj_pool)
-        
-        # Oversample class thiểu số để đủ cho tất cả các batch
-        if is_bg_minority:
-            # Background là thiểu số, cần oversample
-            required_bg = self.num_batches * self.bg_per_batch
-            repeats = (required_bg // len(bg_pool)) + 1
-            bg_pool_extended = []
-            for _ in range(repeats):
-                temp = bg_pool.copy()
-                if self.shuffle:
-                    random.shuffle(temp)
-                bg_pool_extended.extend(temp)
-            bg_pool = bg_pool_extended[:required_bg]
-        else:
-            # Object là thiểu số, cần oversample
-            required_obj = self.num_batches * self.obj_per_batch
-            repeats = (required_obj // len(obj_pool)) + 1
-            obj_pool_extended = []
-            for _ in range(repeats):
-                temp = obj_pool.copy()
-                if self.shuffle:
-                    random.shuffle(temp)
-                obj_pool_extended.extend(temp)
-            obj_pool = obj_pool_extended[:required_obj]
-        
-        # Tạo các batch
-        bg_ptr = 0
-        obj_ptr = 0
-        spaced = False
-        if spaced:
-            for batch_idx in range(self.num_batches):
-                batch = []
-                
-                # Lấy san kẽ obj và bg theo pattern: obj-bg-obj-bg-obj-bg...
-                # Tính xem phải lấy bao nhiêu cặp obj-bg
-                min_pairs = min(self.obj_per_batch, self.bg_per_batch)
-                
-                # Lấy các cặp obj-bg
-                for _ in range(min_pairs):
-                    # Lấy 1 obj
-                    if obj_ptr >= len(obj_pool):
-                        if self.drop_last:
-                            return
-                        obj_ptr = 0
-                    batch.append(obj_pool[obj_ptr])
-                    obj_ptr += 1
-                    
-                    # Lấy 1 bg
-                    if bg_ptr >= len(bg_pool):
-                        if self.drop_last:
-                            return
-                        bg_ptr = 0
-                    batch.append(bg_pool[bg_ptr])
-                    bg_ptr += 1
-                
-                # Lấy phần dư nếu obj_per_batch != bg_per_batch
-                # Nếu obj nhiều hơn bg trong batch
-                for _ in range(self.obj_per_batch - min_pairs):
-                    if obj_ptr >= len(obj_pool):
-                        if self.drop_last:
-                            return
-                        obj_ptr = 0
-                    batch.append(obj_pool[obj_ptr])
-                    obj_ptr += 1
-                
-                # Nếu bg nhiều hơn obj trong batch
-                for _ in range(self.bg_per_batch - min_pairs):
-                    if bg_ptr >= len(bg_pool):
-                        if self.drop_last:
-                            return
-                        bg_ptr = 0
-                    batch.append(bg_pool[bg_ptr])
-                    bg_ptr += 1
-                yield batch
-        else:
-            for batch_idx in range(self.num_batches):
-                batch = []
-                
-                # Lấy (batch_size - 1) ảnh bg + 1 ảnh obj
-                num_bg = self.batch_size - 1
-                if obj_ptr >= len(obj_pool):
-                    if self.drop_last:
-                        return
-                    obj_ptr = 0
-                batch.append(obj_pool[obj_ptr])
-                obj_ptr += 1
-                
-                for _ in range(num_bg):
-                    if bg_ptr >= len(bg_pool):
-                        if self.drop_last:
-                            return
-                        bg_ptr = 0
-                    batch.append(bg_pool[bg_ptr])
-                    bg_ptr += 1
-                
-            yield batch
-    
-    def __len__(self):
-        """Trả về số lượng batches trong một epoch"""
-        return self.num_batches
-
 
 class _RepeatSampler:
-    """
-    Sampler that repeats forever for infinite iteration.
+    """Sampler that repeats forever for infinite iteration.
 
-    This sampler wraps another sampler and yields its contents indefinitely, allowing for infinite iteration
-    over a dataset without recreating the sampler.
+    This sampler wraps another sampler and yields its contents indefinitely, allowing for infinite iteration over a
+    dataset without recreating the sampler.
 
     Attributes:
         sampler (Dataset.sampler): The sampler to repeat.
@@ -375,7 +112,108 @@ class _RepeatSampler:
             yield from iter(self.sampler)
 
 
-def seed_worker(worker_id: int):  # noqa
+class ContiguousDistributedSampler(torch.utils.data.Sampler):
+    """Distributed sampler that assigns contiguous batch-aligned chunks of the dataset to each GPU.
+
+    Unlike PyTorch's DistributedSampler which distributes samples in a round-robin fashion (GPU 0 gets indices
+    [0,2,4,...], GPU 1 gets [1,3,5,...]), this sampler gives each GPU contiguous batches of the dataset (GPU 0 gets
+    batches [0,1,2,...], GPU 1 gets batches [k,k+1,...], etc.). This preserves any ordering or grouping in the original
+    dataset, which is critical when samples are organized by similarity (e.g., images sorted by size to enable efficient
+    batching without padding when using rect=True).
+
+    The sampler handles uneven batch counts by distributing remainder batches to the first few ranks, ensuring all
+    samples are covered exactly once across all GPUs.
+
+    Args:
+        dataset (Dataset): Dataset to sample from. Must implement __len__.
+        num_replicas (int, optional): Number of distributed processes. Defaults to world size.
+        batch_size (int, optional): Batch size used by dataloader. Defaults to dataset batch size.
+        rank (int, optional): Rank of current process. Defaults to current rank.
+        shuffle (bool, optional): Whether to shuffle indices within each rank's chunk. Defaults to False. When True,
+            shuffling is deterministic and controlled by set_epoch() for reproducibility.
+
+    Examples:
+        >>> # For validation with size-grouped images
+        >>> sampler = ContiguousDistributedSampler(val_dataset, batch_size=32, shuffle=False)
+        >>> loader = DataLoader(val_dataset, batch_size=32, sampler=sampler)
+        >>> # For training with shuffling
+        >>> sampler = ContiguousDistributedSampler(train_dataset, batch_size=32, shuffle=True)
+        >>> for epoch in range(num_epochs):
+        ...     sampler.set_epoch(epoch)
+        ...     for batch in loader:
+        ...         ...
+    """
+
+    def __init__(
+        self,
+        dataset: Dataset,
+        num_replicas: int | None = None,
+        batch_size: int | None = None,
+        rank: int | None = None,
+        shuffle: bool = False,
+    ) -> None:
+        """Initialize the sampler with dataset and distributed training parameters."""
+        if num_replicas is None:
+            num_replicas = dist.get_world_size() if dist.is_initialized() else 1
+        if rank is None:
+            rank = dist.get_rank() if dist.is_initialized() else 0
+        if batch_size is None:
+            batch_size = getattr(dataset, "batch_size", 1)
+
+        self.num_replicas = num_replicas
+        self.batch_size = batch_size
+        self.rank = rank
+        self.epoch = 0
+        self.shuffle = shuffle
+        self.total_size = len(dataset)
+        self.num_batches = math.ceil(self.total_size / self.batch_size)
+
+    def _get_rank_indices(self) -> tuple[int, int]:
+        """Calculate the start and end sample indices for this rank."""
+        # Calculate which batches this rank handles
+        batches_per_rank_base = self.num_batches // self.num_replicas
+        remainder = self.num_batches % self.num_replicas
+
+        # This rank gets an extra batch if rank < remainder
+        batches_for_this_rank = batches_per_rank_base + (1 if self.rank < remainder else 0)
+
+        # Calculate starting batch: base position + number of extra batches given to earlier ranks
+        start_batch = self.rank * batches_per_rank_base + min(self.rank, remainder)
+        end_batch = start_batch + batches_for_this_rank
+
+        # Convert batch indices to sample indices
+        start_idx = start_batch * self.batch_size
+        end_idx = min(end_batch * self.batch_size, self.total_size)
+
+        return start_idx, end_idx
+
+    def __iter__(self) -> Iterator:
+        """Generate indices for this rank's contiguous chunk of the dataset."""
+        start_idx, end_idx = self._get_rank_indices()
+        indices = list(range(start_idx, end_idx))
+
+        if self.shuffle:
+            g = torch.Generator()
+            g.manual_seed(self.epoch)
+            indices = [indices[i] for i in torch.randperm(len(indices), generator=g).tolist()]
+
+        return iter(indices)
+
+    def __len__(self) -> int:
+        """Return the number of samples in this rank's chunk."""
+        start_idx, end_idx = self._get_rank_indices()
+        return end_idx - start_idx
+
+    def set_epoch(self, epoch: int) -> None:
+        """Set the epoch for this sampler to ensure different shuffling patterns across epochs.
+
+        Args:
+            epoch (int): Epoch number to use as the random seed for shuffling.
+        """
+        self.epoch = epoch
+
+
+def seed_worker(worker_id: int) -> None:
     """Set dataloader worker seed for reproducibility across worker processes."""
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
@@ -391,12 +229,9 @@ def build_yolo_dataset(
     rect: bool = False,
     stride: int = 32,
     multi_modal: bool = False,
-):
+) -> Dataset:
     """Build and return a YOLO dataset based on configuration parameters."""
-    if cfg.use_conf_aware:
-        dataset = YOLOConfidenceAwareDataset
-    else:
-        dataset = YOLOMultiModalDataset if multi_modal else YOLODataset
+    dataset = YOLOMultiModalDataset if multi_modal else YOLODataset
     return dataset(
         img_path=img_path,
         imgsz=cfg.imgsz,
@@ -425,7 +260,7 @@ def build_grounding(
     rect: bool = False,
     stride: int = 32,
     max_samples: int = 80,
-):
+) -> Dataset:
     """Build and return a GroundingDataset based on configuration parameters."""
     return GroundingDataset(
         img_path=img_path,
@@ -447,9 +282,16 @@ def build_grounding(
     )
 
 
-def build_dataloader(dataset, batch: int, workers: int, shuffle: bool = True, rank: int = -1, drop_last: bool = False, mode = 'val'):
-    """
-    Create and return an InfiniteDataLoader or DataLoader for training or validation.
+def build_dataloader(
+    dataset,
+    batch: int,
+    workers: int,
+    shuffle: bool = True,
+    rank: int = -1,
+    drop_last: bool = False,
+    pin_memory: bool = True,
+) -> InfiniteDataLoader:
+    """Create and return an InfiniteDataLoader or DataLoader for training or validation.
 
     Args:
         dataset (Dataset): Dataset to load data from.
@@ -458,6 +300,7 @@ def build_dataloader(dataset, batch: int, workers: int, shuffle: bool = True, ra
         shuffle (bool, optional): Whether to shuffle the dataset.
         rank (int, optional): Process rank in distributed training. -1 for single-GPU training.
         drop_last (bool, optional): Whether to drop the last incomplete batch.
+        pin_memory (bool, optional): Whether to use pinned memory for dataloader.
 
     Returns:
         (InfiniteDataLoader): A dataloader that can be used for training or validation.
@@ -470,7 +313,13 @@ def build_dataloader(dataset, batch: int, workers: int, shuffle: bool = True, ra
     batch = min(batch, len(dataset))
     nd = torch.cuda.device_count()  # number of CUDA devices
     nw = min(os.cpu_count() // max(nd, 1), workers)  # number of workers
-    sampler = None if rank == -1 else distributed.DistributedSampler(dataset, shuffle=shuffle)
+    sampler = (
+        None
+        if rank == -1
+        else distributed.DistributedSampler(dataset, shuffle=shuffle)
+        if shuffle
+        else ContiguousDistributedSampler(dataset)
+    )
     generator = torch.Generator()
     generator.manual_seed(6148914691236517205 + RANK)
     return InfiniteDataLoader(
@@ -480,18 +329,18 @@ def build_dataloader(dataset, batch: int, workers: int, shuffle: bool = True, ra
         num_workers=nw,
         sampler=sampler,
         prefetch_factor=4 if nw > 0 else None,  # increase over default 2
-        pin_memory=nd > 0,
+        pin_memory=nd > 0 and pin_memory,
         collate_fn=getattr(dataset, "collate_fn", None),
         worker_init_fn=seed_worker,
         generator=generator,
         drop_last=drop_last and len(dataset) % batch != 0,
-        mode = mode,
     )
 
 
-def check_source(source):
-    """
-    Check the type of input source and return corresponding flag values.
+def check_source(
+    source: str | int | Path | list | tuple | np.ndarray | Image.Image | torch.Tensor,
+) -> tuple[Any, bool, bool, bool, bool, bool]:
+    """Check the type of input source and return corresponding flag values.
 
     Args:
         source (str | int | Path | list | tuple | np.ndarray | PIL.Image | torch.Tensor): The input source to check.
@@ -538,12 +387,17 @@ def check_source(source):
     return source, webcam, screenshot, from_img, in_memory, tensor
 
 
-def load_inference_source(source=None, batch: int = 1, vid_stride: int = 1, buffer: bool = False, channels: int = 3):
-    """
-    Load an inference source for object detection and apply necessary transformations.
+def load_inference_source(
+    source: str | int | Path | list | tuple | np.ndarray | Image.Image | torch.Tensor,
+    batch: int = 1,
+    vid_stride: int = 1,
+    buffer: bool = False,
+    channels: int = 3,
+):
+    """Load an inference source for object detection and apply necessary transformations.
 
     Args:
-        source (str | Path | torch.Tensor | PIL.Image | np.ndarray, optional): The input source for inference.
+        source (str | Path | list | tuple | torch.Tensor | PIL.Image | np.ndarray): The input source for inference.
         batch (int, optional): Batch size for dataloaders.
         vid_stride (int, optional): The frame interval for video sources.
         buffer (bool, optional): Whether stream frames will be buffered.

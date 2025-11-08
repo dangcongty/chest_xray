@@ -7,13 +7,8 @@ import types
 from copy import deepcopy
 from pathlib import Path
 
-import numpy as np
 import torch
-import torch._dynamo
 import torch.nn as nn
-import torch.nn.functional as F
-import torchvision
-from torchvision.ops import box_iou
 
 from ultralytics.nn.autobackend import check_class_names
 from ultralytics.nn.modules import (
@@ -54,6 +49,7 @@ from ultralytics.nn.modules import (
     Focus,
     GhostBottleneck,
     GhostConv,
+    Heatmap,
     HGBlock,
     HGStem,
     ImagePoolingAttn,
@@ -78,6 +74,7 @@ from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import (
     E2EDetectLoss,
+    HeatmapLoss,
     v8ClassificationLoss,
     v8DetectionLoss,
     v8OBBLoss,
@@ -100,11 +97,10 @@ from ultralytics.utils.torch_utils import (
 
 
 class BaseModel(torch.nn.Module):
-    """
-    Base class for all YOLO models in the Ultralytics family.
+    """Base class for all YOLO models in the Ultralytics family.
 
-    This class provides common functionality for YOLO models including forward pass handling, model fusion,
-    information display, and weight loading capabilities.
+    This class provides common functionality for YOLO models including forward pass handling, model fusion, information
+    display, and weight loading capabilities.
 
     Attributes:
         model (torch.nn.Module): The neural network model.
@@ -126,8 +122,7 @@ class BaseModel(torch.nn.Module):
     """
 
     def forward(self, x, *args, **kwargs):
-        """
-        Perform forward pass of the model for either training or inference.
+        """Perform forward pass of the model for either training or inference.
 
         If x is a dict, calculates and returns the loss for training. Otherwise, returns predictions for inference.
 
@@ -144,8 +139,7 @@ class BaseModel(torch.nn.Module):
         return self.predict(x, *args, **kwargs)
 
     def predict(self, x, profile=False, visualize=False, augment=False, embed=None):
-        """
-        Perform a forward pass through the network.
+        """Perform a forward pass through the network.
 
         Args:
             x (torch.Tensor): The input tensor to the model.
@@ -162,8 +156,7 @@ class BaseModel(torch.nn.Module):
         return self._predict_once(x, profile, visualize, embed)
 
     def _predict_once(self, x, profile=False, visualize=False, embed=None):
-        """
-        Perform a forward pass through the network.
+        """Perform a forward pass through the network.
 
         Args:
             x (torch.Tensor): The input tensor to the model.
@@ -177,7 +170,6 @@ class BaseModel(torch.nn.Module):
         y, dt, embeddings = [], [], []  # outputs
         embed = frozenset(embed) if embed is not None else {-1}
         max_idx = max(embed)
-        ct_feats = []
         for m in self.model:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
@@ -185,15 +177,13 @@ class BaseModel(torch.nn.Module):
                 self._profile_one_layer(m, x, dt)
             x = m(x)  # run
             y.append(x if m.i in self.save else None)  # save output
-            if m.i in [10, 19, 22, 25, 28]:
-                ct_feats.append(x)
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
             if m.i in embed:
                 embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
                 if m.i == max_idx:
                     return torch.unbind(torch.cat(embeddings, 1), dim=0)
-        return x, ct_feats
+        return x
 
     def _predict_augment(self, x):
         """Perform augmentations on input image x and return augmented inference."""
@@ -204,8 +194,7 @@ class BaseModel(torch.nn.Module):
         return self._predict_once(x)
 
     def _profile_one_layer(self, m, x, dt):
-        """
-        Profile the computation time and FLOPs of a single layer of the model on a given input.
+        """Profile the computation time and FLOPs of a single layer of the model on a given input.
 
         Args:
             m (torch.nn.Module): The layer to be profiled.
@@ -230,8 +219,7 @@ class BaseModel(torch.nn.Module):
             LOGGER.info(f"{sum(dt):10.2f} {'-':>10s} {'-':>10s}  Total")
 
     def fuse(self, verbose=True):
-        """
-        Fuse the `Conv2d()` and `BatchNorm2d()` layers of the model into a single layer for improved computation
+        """Fuse the `Conv2d()` and `BatchNorm2d()` layers of the model into a single layer for improved computation
         efficiency.
 
         Returns:
@@ -262,8 +250,7 @@ class BaseModel(torch.nn.Module):
         return self
 
     def is_fused(self, thresh=10):
-        """
-        Check if the model has less than a certain threshold of BatchNorm layers.
+        """Check if the model has less than a certain threshold of BatchNorm layers.
 
         Args:
             thresh (int, optional): The threshold number of BatchNorm layers.
@@ -275,8 +262,7 @@ class BaseModel(torch.nn.Module):
         return sum(isinstance(v, bn) for v in self.modules()) < thresh  # True if < 'thresh' BatchNorm layers in model
 
     def info(self, detailed=False, verbose=True, imgsz=640):
-        """
-        Print model information.
+        """Print model information.
 
         Args:
             detailed (bool): If True, prints out detailed information about the model.
@@ -286,8 +272,7 @@ class BaseModel(torch.nn.Module):
         return model_info(self, detailed=detailed, verbose=verbose, imgsz=imgsz)
 
     def _apply(self, fn):
-        """
-        Apply a function to all tensors in the model that are not parameters or registered buffers.
+        """Apply a function to all tensors in the model that are not parameters or registered buffers.
 
         Args:
             fn (function): The function to apply to the model.
@@ -306,8 +291,7 @@ class BaseModel(torch.nn.Module):
         return self
 
     def load(self, weights, verbose=True):
-        """
-        Load weights into the model.
+        """Load weights into the model.
 
         Args:
             weights (dict | torch.nn.Module): The pre-trained weights to be loaded.
@@ -331,433 +315,30 @@ class BaseModel(torch.nn.Module):
         if verbose:
             LOGGER.info(f"Transferred {len_updated_csd}/{len(self.model.state_dict())} items from pretrained weights")
 
-    def load_rois(self):
-        import numpy as np
-        rois = []
-        for i in range(14):
-            roi = np.load(f'datasets/rois/{i}.npy')
-            roi = torch.from_numpy(roi)
-            rois.append(roi)
-        self.rois = rois
-        self.num_rois = 3
-
-    @staticmethod
-    def box_iou(boxes, box):
-        """
-        Tính IoU giữa nhiều boxes và 1 box duy nhất.
-        boxes: Tensor [N, 4]  (x1, y1, x2, y2)
-        box:   Tensor [4]     (x1, y1, x2, y2)
-        Trả về: Tensor [N] - IoU cho từng box
-        """
-        # Ép kiểu cho thống nhất
-        boxes = boxes.to(torch.float32)
-        box = box.to(torch.float32)
-
-        # Tính tọa độ giao nhau
-        inter_x1 = torch.max(boxes[:, 0], box[0])
-        inter_y1 = torch.max(boxes[:, 1], box[1])
-        inter_x2 = torch.min(boxes[:, 2], box[2])
-        inter_y2 = torch.min(boxes[:, 3], box[3])
-
-        # Chiều rộng và cao vùng giao nhau (>=0)
-        inter_w = torch.clamp(inter_x2 - inter_x1, min=0)
-        inter_h = torch.clamp(inter_y2 - inter_y1, min=0)
-        inter_area = inter_w * inter_h
-
-        # Diện tích từng box
-        area_boxes = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
-        area_box = (box[2] - box[0]) * (box[3] - box[1])
-
-        # IoU
-        union = area_boxes + area_box - inter_area
-        iou = inter_area / union
-        return iou
-
-    @staticmethod
-    def center_distance(center_rois, center_box):
-        """
-        Tính khoảng cách Euclidean giữa mỗi điểm trong center_rois và center_box.
-        
-        Args:
-            center_rois: Tensor [N, 2]  - tọa độ (x, y) của các ROI
-            center_box:  Tensor [2]     - tọa độ (x, y) của 1 box trung tâm
-
-        Returns:
-            Tensor [N] - khoảng cách Euclidean cho từng ROI
-        """
-        # Đảm bảo kiểu dữ liệu thống nhất
-        center_rois = center_rois.to(torch.float32)
-        center_box = center_box.to(torch.float32)
-
-        # Tính khoảng cách Euclidean
-        distances = torch.sqrt(torch.sum((center_rois - center_box) ** 2, dim=1))
-        return distances
-
-
-    def loss(self, batch, preds=None, feats=None, mode='train'):
-        """
-        Compute loss.
+    def loss(self, batch, preds=None):
+        """Compute loss.
 
         Args:
             batch (dict): Batch to compute loss on.
             preds (torch.Tensor | list[torch.Tensor], optional): Predictions.
         """
-        if getattr(self, 'rois', None) is None:
-            self.load_rois()
-
         if getattr(self, "criterion", None) is None:
             self.criterion = self.init_criterion()
 
         if preds is None:
-            preds, feats = self.forward(batch["img"])
-        
-        # YOLO Loss 
-        yolo_loss = self.criterion(preds, batch)
-        
-        # Contrastive Loss
-        abnormally_idx = torch.unique(batch['batch_idx'])
-        full_batch_idx = torch.arange(0, len(batch['img']), device=batch['img'][0].device)
-        nofinding_idx = full_batch_idx[~torch.isin(full_batch_idx, abnormally_idx)]
-        
-        # global_ct_losses = self.global_contrastive_loss(feats[0], abnormally_idx, nofinding_idx)
-        local_ct_loss = self.local_contrastive_loss(batch, feats[1], mode = mode)
-        # local_ct_loss = torch.tensor([0], device=feats[0].device)
-        global_ct_losses = torch.tensor([0], device=feats[0].device) # Mosaic gây lỗi
-        # local_ct_loss = torch.tensor([0], device=feats[0].device) # TODO
-
-        return yolo_loss, [global_ct_losses, local_ct_loss]
-
-    def local_contrastive_loss(self, batch, feat, roi_size = (20, 20), temperature = 0.07, ct_type = 'margin', mode = 'train'):
-        """
-        Compute contrastive loss for object detection
-        
-        Args:
-            batch: dict with 'bboxes', 'cls', 'batch_idx'
-            feat: feature map [B, C, H, W]
-            roi_size: output size for ROI pooling
-            ct_type: 'infonce', 'triplet', or 'margin'
-            temperature: temperature for InfoNCE
-        """
-        bbox_xywh = batch['bboxes'] 
-        H, W = feat.shape[2:]
-        scale = torch.tensor([W, H, W, H], device=bbox_xywh.device)
-        batchsize = batch['img'].shape[0]
-
-        box_ids = batch['batch_idx'].view(-1, 1)
-        num_boxes = len(box_ids)
-        if num_boxes == 0:
-            local_ct_loss = box_ids.new_tensor(0.0)
-
-        # Convert xywh to xyxy
-        _bbox_xywh = bbox_xywh.clone()
-        bbox_xyxy = torch.zeros_like(bbox_xywh)
-        bbox_xyxy[:, 0] = _bbox_xywh[:, 0] - _bbox_xywh[:, 2]/2
-        bbox_xyxy[:, 1] = _bbox_xywh[:, 1] - _bbox_xywh[:, 3]/2
-        bbox_xyxy[:, 2] = _bbox_xywh[:, 0] + _bbox_xywh[:, 2]/2
-        bbox_xyxy[:, 3] = _bbox_xywh[:, 1] + _bbox_xywh[:, 3]/2
-        bbox_xyxy = bbox_xyxy * scale
-        
-
-        if mode == 'train':
-            bbox_xyxy = torch.cat([bbox_xyxy,]*batchsize)
-            box_ids = torch.cat([box_ids,]*batchsize)
-            for i in range(1, batchsize):
-                box_ids[i*num_boxes:(i+1)*num_boxes] += i
- 
-        bbox_xyxy_with_ids = torch.cat([
-            box_ids.view(-1, 1), 
-            bbox_xyxy
-        ], dim=-1)
-        
-        # Extract ROI features
-        roi_feats = self.roi_crop_resize(
-            features=feat,
-            bboxes=bbox_xyxy_with_ids,
-            output_size=roi_size
-        ) 
-
-        if mode == 'train':
-            nf_feats = roi_feats[num_boxes:]
-            nf_embeds = F.adaptive_avg_pool2d(nf_feats, 1).squeeze(-1).squeeze(-1)  # [N, C]
-            nf_embeds = F.normalize(nf_embeds, dim=1)  # L2 normalize
-        abn_feats = roi_feats[:num_boxes]
-        
-        # Global average pooling and normalize
-        abn_embeds = F.adaptive_avg_pool2d(abn_feats, 1).squeeze(-1).squeeze(-1)  # [N, C]
-        abn_embeds = F.normalize(abn_embeds, dim=1)  # L2 normalize
-
-
-        # Compute similarity matrix
-        sim_matrix = torch.matmul(abn_embeds, abn_embeds.T)  # [N, N]
-        
-        # Create masks
-        N = abn_embeds.size(0)
-        device = abn_embeds.device
-        
-        # Self-similarity mask
-        self_mask = torch.eye(N, device=device, dtype=torch.bool)
-
-        # Same image mask
-        # batch_idx = batch['batch_idx'].view(-1, 1)  # [N, 1]
-        # same_image_mask = (batch_idx == batch_idx.T)  # [N, N]
-
-        # Region mask
-        threshold = 0.1  # Ngưỡng IoU, bạn có thể chỉnh
-        iou_matrix = box_iou(bbox_xyxy[:num_boxes], bbox_xyxy[:num_boxes])  # [N, N]
-        iou_mask = (iou_matrix > threshold)
-
-        # Same class mask
-        labels = batch['cls'].view(-1, 1)  # [N, 1]
-        same_class_mask = (labels == labels.T)  # [N, N]
-        
-        # Positive pairs: same class AND different image
-        positive_mask = same_class_mask & (~iou_mask) & (~self_mask)
-        
-        # Negative pairs: everything that's NOT positive (excluding self)
-        negative_mask = (~positive_mask) & (~self_mask)
-        
-        margin = 0.5
-        
-        # Loss components
-        if positive_mask.sum() > 0:
-            pos_loss = (1 - (positive_mask * sim_matrix)).sum() / positive_mask.sum()
-        else:
-            pos_loss = abn_embeds.new_tensor(0.0)
-
-        if negative_mask.sum() > 0:
-            neg_loss = torch.clamp(negative_mask * sim_matrix - margin, min=0).sum() / negative_mask.sum()
-        else:
-            neg_loss = torch.tensor(0.0, device=abn_embeds.device)
-
-        # Weighted sum
-        neg = 2.0
-        if mode == 'train':
-            nf_sim_matrix = torch.matmul(abn_embeds, nf_embeds.T)  # [N, N]
-            nf_loss = torch.clamp(nf_sim_matrix - margin, min = 0).mean() 
-            nf = 10
-            local_ct_loss = pos_loss + neg * neg_loss + nf * nf_loss
-        else:
-            local_ct_loss = pos_loss + neg * neg_loss
-    
-        return local_ct_loss
-
-    def global_contrastive_loss(self, feat, abnormally_idx, nofinding_idx, ct_type = 'contrastive', temperature=0.07):
-        pooling_size = 5
-        B, C, H, W = feat.shape
-        feat = self.adaptive_to_avgpool(feat, (pooling_size, pooling_size))
-        feat = feat.view((B, -1))
-
-        abnormally_feat = feat[abnormally_idx.to(torch.long)]
-        nofinding_feat = feat[nofinding_idx.to(torch.long)]
-        
-        # Normalize
-        abn_norm = F.normalize(abnormally_feat, p=2, dim=1)
-        nof_norm = F.normalize(nofinding_feat, p=2, dim=1)
-        
-        N1 = abn_norm.shape[0]
-        N2 = nof_norm.shape[0]
-        if N1 <= 1 or N2 <= 1:
-            # ko có pair samples
-            return torch.tensor(0.0, device=feat.device)
-        
-
-        pos_sim = torch.mm(abn_norm, abn_norm.t())
-        neg_sim = torch.mm(abn_norm, nof_norm.t())
-        
-        pos_mask = ~torch.eye(pos_sim.shape[0], dtype=bool, device=pos_sim.device)
-        
-        if ct_type == 'contrastive':
-            # Điều chỉnh 1: Tăng margin
-            margin = 0.8  # hoặc 0.9
-            # Điều chỉnh 2: Thay đổi công thức loss
-            pos_loss = (1 - pos_sim[pos_mask]).mean()
-            # Penalize negative pairs có similarity cao
-            neg_loss = torch.clamp(neg_sim + margin, min=0).mean()  # đổi dấu margin
-            # Điều chỉnh 3: Thêm weight
-            alpha = 2.0  # tăng trọng số cho neg_loss
-            global_ct_losses = pos_loss + alpha * neg_loss
-            
-        elif ct_type == 'info_nce':
-            pos_sim = pos_sim/temperature
-            neg_sim = neg_sim/temperature
-            global_ct_losses = 0
-            for i in range(N1):
-                # Positives
-                pos_logits = pos_sim[i][pos_mask[i]]
-                # Hard negatives: top-K negative có similarity cao nhất
-                K = min(N2, 10)  # lấy 10 hard negatives
-                hard_neg_logits, _ = torch.topk(neg_sim[i], K)
-                # Combine
-                for pos_logit in pos_logits:
-                    numerator = pos_logit
-                    denominator = torch.logsumexp(
-                        torch.cat([pos_logit.unsqueeze(0), hard_neg_logits]),
-                        dim=0
-                    )
-                    global_ct_losses += -numerator + denominator
-
-        return global_ct_losses
+            preds = self.forward(batch["img"])
+        return self.criterion(preds, batch)
 
     def init_criterion(self):
         """Initialize the loss criterion for the BaseModel."""
         raise NotImplementedError("compute_loss() needs to be implemented by task heads")
 
-    @staticmethod
-    def roi_crop_resize(features, bboxes, output_size):
-        """
-        Args:
-            features: [B, C, H, W] feature maps
-            bboxes: [N, 5] (batch_idx, x1, y1, x2, y2) in pixel coords
-            output_size: (h, w) or int
-
-        Returns:
-            crops: [N, C, h, w]
-        """
-        if isinstance(output_size, int):
-            out_h = out_w = output_size
-        else:
-            out_h, out_w = output_size
-
-        device = features.device
-        dtype = features.dtype
-        B, C, H, W = features.shape
-
-        num_rois = bboxes.size(0)
-        batch_idx = bboxes[:, 0].long()
-        x1, y1, x2, y2 = bboxes[:, 1], bboxes[:, 2], bboxes[:, 3], bboxes[:, 4]
-
-        # chuẩn hóa về [-1, 1] cho grid_sample
-        x1_norm = x1 / (W - 1) * 2 - 1
-        x2_norm = x2 / (W - 1) * 2 - 1
-        y1_norm = y1 / (H - 1) * 2 - 1
-        y2_norm = y2 / (H - 1) * 2 - 1
-
-        # tạo grid [N, out_h, out_w, 2]
-        xs = torch.linspace(0, 1, out_w, device=device, dtype=dtype)
-        ys = torch.linspace(0, 1, out_h, device=device, dtype=dtype)
-        grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
-        grid = torch.stack([grid_x, grid_y], dim=-1)  # [out_h, out_w, 2]
-        grid = grid.unsqueeze(0).repeat(num_rois, 1, 1, 1)  # [N, out_h, out_w, 2]
-
-        # scale grid theo từng box
-        x_grid = x1_norm[:, None, None].to(dtype) + grid[..., 0] * (x2_norm - x1_norm)[:, None, None].to(dtype)
-        y_grid = y1_norm[:, None, None].to(dtype) + grid[..., 1] * (y2_norm - y1_norm)[:, None, None].to(dtype)
-
-        grid = torch.stack([x_grid, y_grid], dim=-1)  # [N, out_h, out_w, 2]
-
-        # gather features theo batch index
-        feat_per_roi = features[batch_idx]  # [N, C, H, W]
-
-        # apply grid_sample
-        crops = F.grid_sample(feat_per_roi, grid, mode="bilinear", align_corners=True)
-        return crops  # [N, C, out_h, out_w]
-
-
-    @staticmethod
-    def roi_align_custom(feature_map, rois, output_size=(7,7), spatial_scale=1.0,
-                        sampling_ratio=-1, aligned=True):
-        """
-        Custom ROIAlign with sampling_ratio (vectorized).
-
-        Args:
-            feature_map: (N, C, H, W)
-            rois: (K, 5) [batch_idx, x1, y1, x2, y2] theo pixel gốc
-            output_size: (h, w)
-            spatial_scale: scale từ ảnh gốc -> feature_map
-            sampling_ratio: số điểm mẫu trong mỗi bin (-1 = auto)
-            aligned: có offset 0.5 pixel hay không
-        Return:
-            (K, C, h, w)
-        """
-        N, C, H, W = feature_map.shape
-        h, w = output_size
-        device, dtype = feature_map.device, feature_map.dtype
-        K = rois.size(0)
-
-        batch_idx = rois[:, 0].long()
-        rois = rois[:, 1:] * spatial_scale
-
-        if aligned:
-            rois[:, [0, 1]] -= 0.5
-            rois[:, [2, 3]] -= 0.5
-
-        x1, y1, x2, y2 = rois.unbind(dim=1)
-        roi_w = (x2 - x1).clamp(min=1e-6)
-        roi_h = (y2 - y1).clamp(min=1e-6)
-
-        bin_w = roi_w / w
-        bin_h = roi_h / h
-
-        # xác định số điểm sample trong mỗi bin
-        if sampling_ratio > 0:
-            r_w = torch.full_like(bin_w, sampling_ratio, dtype=torch.int)
-            r_h = torch.full_like(bin_h, sampling_ratio, dtype=torch.int)
-        else:
-            r_w = torch.ceil(bin_w).to(torch.int)
-            r_h = torch.ceil(bin_h).to(torch.int)
-        # tạo grid [h, w, r_h, r_w]
-        ph = torch.arange(h, device=device, dtype=dtype)[:, None, None, None]
-        pw = torch.arange(w, device=device, dtype=dtype)[None, :, None, None]
-        rh = torch.arange(r_h.max(), device=device, dtype=dtype)[None, None, :, None]
-        rw = torch.arange(r_w.max(), device=device, dtype=dtype)[None, None, None, :]
-
-        # normal hóa offset trong bin
-        sample_y = (rh + 0.5) / r_h.max()
-        sample_x = (rw + 0.5) / r_w.max()
-
-        # lặp theo ROI
-        outputs = []
-        for k in range(K):
-            by, bx = batch_idx[k], batch_idx[k]
-            roi_x1, roi_y1 = x1[k], y1[k]
-            bw, bh = bin_w[k], bin_h[k]
-
-            # tạo tọa độ cho tất cả sample trong từng bin
-            gx = roi_x1 + (pw + sample_x) * bw
-            gy = roi_y1 + (ph + sample_y) * bh
-
-            # chuẩn hóa về [-1,1]
-            gx = gx / (W - 1) * 2 - 1
-            gy = gy / (H - 1) * 2 - 1
-            grid = torch.stack((gx, gy), dim=-1)  # (h,w,rh,rw,2)
-
-            # reshape về (1,h*rh,w*rw,2)
-            grid = grid.view(1, h * sample_y.numel(), w * sample_x.numel(), 2)
-
-            feat = F.grid_sample(
-                feature_map[by:by+1], grid,
-                mode="bilinear", align_corners=aligned
-            )
-
-            # reshape lại (C,h,rh,w,rw) rồi average theo (rh,rw)
-            feat = feat.view(C, h, sample_y.numel(), w, sample_x.numel())
-            feat = feat.mean(dim=(2, 4))  # average theo sample points
-            outputs.append(feat.unsqueeze(0))
-
-        return torch.cat(outputs, dim=0)  # (K,C,h,w)
-    
-    @staticmethod
-    def adaptive_to_avgpool(x, output_size):
-        # x: (B, C, H, W)
-        H, W = x.shape[2:]
-        H_out, W_out = output_size
-
-        stride_h = H // H_out
-        stride_w = W // W_out
-
-        kernel_h = H - (H_out - 1) * stride_h
-        kernel_w = W - (W_out - 1) * stride_w
-
-        return F.avg_pool2d(x, kernel_size=(kernel_h, kernel_w),
-                            stride=(stride_h, stride_w))
-
 
 class DetectionModel(BaseModel):
-    """
-    YOLO detection model.
+    """YOLO detection model.
 
-    This class implements the YOLO detection architecture, handling model initialization, forward pass,
-    augmented inference, and loss computation for object detection tasks.
+    This class implements the YOLO detection architecture, handling model initialization, forward pass, augmented
+    inference, and loss computation for object detection tasks.
 
     Attributes:
         yaml (dict): Model configuration dictionary.
@@ -782,8 +363,7 @@ class DetectionModel(BaseModel):
     """
 
     def __init__(self, cfg="yolo11n.yaml", ch=3, nc=None, verbose=True):
-        """
-        Initialize the YOLO detection model with the given config and parameters.
+        """Initialize the YOLO detection model with the given config and parameters.
 
         Args:
             cfg (str | dict): Model configuration file path or dictionary.
@@ -820,11 +400,11 @@ class DetectionModel(BaseModel):
                 """Perform a forward pass through the model, handling different Detect subclass types accordingly."""
                 if self.end2end:
                     return self.forward(x)["one2many"]
-                return self.forward(x)[0] if isinstance(m, (Segment, YOLOESegment, Pose, OBB)) else self.forward(x)
+                return self.forward(x)[0] if isinstance(m, (Segment, YOLOESegment, Pose, OBB, Heatmap)) else self.forward(x)
 
             self.model.eval()  # Avoid changing batch statistics until training begins
             m.training = True  # Setting it to True to properly return strides
-            m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(1, ch, s, s))[0]])  # forward
+            m.stride = torch.tensor([s / x.shape[-2] for x in _forward(torch.zeros(1, ch, s, s))])  # forward
             self.stride = m.stride
             self.model.train()  # Set model back to training(default) mode
             m.bias_init()  # only run once
@@ -838,8 +418,7 @@ class DetectionModel(BaseModel):
             LOGGER.info("")
 
     def _predict_augment(self, x):
-        """
-        Perform augmentations on input image x and return augmented inference and train outputs.
+        """Perform augmentations on input image x and return augmented inference and train outputs.
 
         Args:
             x (torch.Tensor): Input image tensor.
@@ -864,8 +443,7 @@ class DetectionModel(BaseModel):
 
     @staticmethod
     def _descale_pred(p, flips, scale, img_size, dim=1):
-        """
-        De-scale predictions following augmented inference (inverse operation).
+        """De-scale predictions following augmented inference (inverse operation).
 
         Args:
             p (torch.Tensor): Predictions tensor.
@@ -886,8 +464,7 @@ class DetectionModel(BaseModel):
         return torch.cat((x, y, wh, cls), dim)
 
     def _clip_augmented(self, y):
-        """
-        Clip YOLO augmented inference tails.
+        """Clip YOLO augmented inference tails.
 
         Args:
             y (list[torch.Tensor]): List of detection tensors.
@@ -910,11 +487,10 @@ class DetectionModel(BaseModel):
 
 
 class OBBModel(DetectionModel):
-    """
-    YOLO Oriented Bounding Box (OBB) model.
+    """YOLO Oriented Bounding Box (OBB) model.
 
-    This class extends DetectionModel to handle oriented bounding box detection tasks, providing specialized
-    loss computation for rotated object detection.
+    This class extends DetectionModel to handle oriented bounding box detection tasks, providing specialized loss
+    computation for rotated object detection.
 
     Methods:
         __init__: Initialize YOLO OBB model.
@@ -927,8 +503,7 @@ class OBBModel(DetectionModel):
     """
 
     def __init__(self, cfg="yolo11n-obb.yaml", ch=3, nc=None, verbose=True):
-        """
-        Initialize YOLO OBB model with given config and parameters.
+        """Initialize YOLO OBB model with given config and parameters.
 
         Args:
             cfg (str | dict): Model configuration file path or dictionary.
@@ -944,11 +519,10 @@ class OBBModel(DetectionModel):
 
 
 class SegmentationModel(DetectionModel):
-    """
-    YOLO segmentation model.
+    """YOLO segmentation model.
 
-    This class extends DetectionModel to handle instance segmentation tasks, providing specialized
-    loss computation for pixel-level object detection and segmentation.
+    This class extends DetectionModel to handle instance segmentation tasks, providing specialized loss computation for
+    pixel-level object detection and segmentation.
 
     Methods:
         __init__: Initialize YOLO segmentation model.
@@ -961,8 +535,7 @@ class SegmentationModel(DetectionModel):
     """
 
     def __init__(self, cfg="yolo11n-seg.yaml", ch=3, nc=None, verbose=True):
-        """
-        Initialize Ultralytics YOLO segmentation model with given config and parameters.
+        """Initialize Ultralytics YOLO segmentation model with given config and parameters.
 
         Args:
             cfg (str | dict): Model configuration file path or dictionary.
@@ -977,12 +550,19 @@ class SegmentationModel(DetectionModel):
         return v8SegmentationLoss(self)
 
 
-class PoseModel(DetectionModel):
-    """
-    YOLO pose model.
+class HeatmapModel(DetectionModel):
+    def __init__(self, cfg="yolo11n-seg.yaml", ch=3, nc=None, verbose=True):
+        super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
 
-    This class extends DetectionModel to handle human pose estimation tasks, providing specialized
-    loss computation for keypoint detection and pose estimation.
+    def init_criterion(self):
+        """Initialize the loss criterion for the SegmentationModel."""
+        return HeatmapLoss(self)
+
+class PoseModel(DetectionModel):
+    """YOLO pose model.
+
+    This class extends DetectionModel to handle human pose estimation tasks, providing specialized loss computation for
+    keypoint detection and pose estimation.
 
     Attributes:
         kpt_shape (tuple): Shape of keypoints data (num_keypoints, num_dimensions).
@@ -998,8 +578,7 @@ class PoseModel(DetectionModel):
     """
 
     def __init__(self, cfg="yolo11n-pose.yaml", ch=3, nc=None, data_kpt_shape=(None, None), verbose=True):
-        """
-        Initialize Ultralytics YOLO Pose model.
+        """Initialize Ultralytics YOLO Pose model.
 
         Args:
             cfg (str | dict): Model configuration file path or dictionary.
@@ -1021,11 +600,10 @@ class PoseModel(DetectionModel):
 
 
 class ClassificationModel(BaseModel):
-    """
-    YOLO classification model.
+    """YOLO classification model.
 
-    This class implements the YOLO classification architecture for image classification tasks,
-    providing model initialization, configuration, and output reshaping capabilities.
+    This class implements the YOLO classification architecture for image classification tasks, providing model
+    initialization, configuration, and output reshaping capabilities.
 
     Attributes:
         yaml (dict): Model configuration dictionary.
@@ -1046,8 +624,7 @@ class ClassificationModel(BaseModel):
     """
 
     def __init__(self, cfg="yolo11n-cls.yaml", ch=3, nc=None, verbose=True):
-        """
-        Initialize ClassificationModel with YAML, channels, number of classes, verbose flag.
+        """Initialize ClassificationModel with YAML, channels, number of classes, verbose flag.
 
         Args:
             cfg (str | dict): Model configuration file path or dictionary.
@@ -1059,8 +636,7 @@ class ClassificationModel(BaseModel):
         self._from_yaml(cfg, ch, nc, verbose)
 
     def _from_yaml(self, cfg, ch, nc, verbose):
-        """
-        Set Ultralytics YOLO model configurations and define the model architecture.
+        """Set Ultralytics YOLO model configurations and define the model architecture.
 
         Args:
             cfg (str | dict): Model configuration file path or dictionary.
@@ -1084,8 +660,7 @@ class ClassificationModel(BaseModel):
 
     @staticmethod
     def reshape_outputs(model, nc):
-        """
-        Update a TorchVision classification model to class count 'n' if required.
+        """Update a TorchVision classification model to class count 'n' if required.
 
         Args:
             model (torch.nn.Module): Model to update.
@@ -1117,8 +692,7 @@ class ClassificationModel(BaseModel):
 
 
 class RTDETRDetectionModel(DetectionModel):
-    """
-    RTDETR (Real-time DEtection and Tracking using Transformers) Detection Model class.
+    """RTDETR (Real-time DEtection and Tracking using Transformers) Detection Model class.
 
     This class is responsible for constructing the RTDETR architecture, defining loss functions, and facilitating both
     the training and inference processes. RTDETR is an object detection and tracking model that extends from the
@@ -1141,8 +715,7 @@ class RTDETRDetectionModel(DetectionModel):
     """
 
     def __init__(self, cfg="rtdetr-l.yaml", ch=3, nc=None, verbose=True):
-        """
-        Initialize the RTDETRDetectionModel.
+        """Initialize the RTDETRDetectionModel.
 
         Args:
             cfg (str | dict): Configuration file name or path.
@@ -1152,6 +725,21 @@ class RTDETRDetectionModel(DetectionModel):
         """
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
 
+    def _apply(self, fn):
+        """Apply a function to all tensors in the model that are not parameters or registered buffers.
+
+        Args:
+            fn (function): The function to apply to the model.
+
+        Returns:
+            (RTDETRDetectionModel): An updated BaseModel object.
+        """
+        self = super()._apply(fn)
+        m = self.model[-1]
+        m.anchors = fn(m.anchors)
+        m.valid_mask = fn(m.valid_mask)
+        return self
+
     def init_criterion(self):
         """Initialize the loss criterion for the RTDETRDetectionModel."""
         from ultralytics.models.utils.loss import RTDETRDetectionLoss
@@ -1159,8 +747,7 @@ class RTDETRDetectionModel(DetectionModel):
         return RTDETRDetectionLoss(nc=self.nc, use_vfl=True)
 
     def loss(self, batch, preds=None):
-        """
-        Compute the loss for the given batch of data.
+        """Compute the loss for the given batch of data.
 
         Args:
             batch (dict): Dictionary containing image and label data.
@@ -1206,8 +793,7 @@ class RTDETRDetectionModel(DetectionModel):
         )
 
     def predict(self, x, profile=False, visualize=False, batch=None, augment=False, embed=None):
-        """
-        Perform a forward pass through the model.
+        """Perform a forward pass through the model.
 
         Args:
             x (torch.Tensor): The input tensor.
@@ -1242,11 +828,10 @@ class RTDETRDetectionModel(DetectionModel):
 
 
 class WorldModel(DetectionModel):
-    """
-    YOLOv8 World Model.
+    """YOLOv8 World Model.
 
-    This class implements the YOLOv8 World model for open-vocabulary object detection, supporting text-based
-    class specification and CLIP model integration for zero-shot detection capabilities.
+    This class implements the YOLOv8 World model for open-vocabulary object detection, supporting text-based class
+    specification and CLIP model integration for zero-shot detection capabilities.
 
     Attributes:
         txt_feats (torch.Tensor): Text feature embeddings for classes.
@@ -1267,8 +852,7 @@ class WorldModel(DetectionModel):
     """
 
     def __init__(self, cfg="yolov8s-world.yaml", ch=3, nc=None, verbose=True):
-        """
-        Initialize YOLOv8 world model with given config and parameters.
+        """Initialize YOLOv8 world model with given config and parameters.
 
         Args:
             cfg (str | dict): Model configuration file path or dictionary.
@@ -1281,8 +865,7 @@ class WorldModel(DetectionModel):
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
 
     def set_classes(self, text, batch=80, cache_clip_model=True):
-        """
-        Set classes in advance so that model could do offline-inference without clip model.
+        """Set classes in advance so that model could do offline-inference without clip model.
 
         Args:
             text (list[str]): List of class names.
@@ -1293,8 +876,7 @@ class WorldModel(DetectionModel):
         self.model[-1].nc = len(text)
 
     def get_text_pe(self, text, batch=80, cache_clip_model=True):
-        """
-        Set classes in advance so that model could do offline-inference without clip model.
+        """Set classes in advance so that model could do offline-inference without clip model.
 
         Args:
             text (list[str]): List of class names.
@@ -1317,8 +899,7 @@ class WorldModel(DetectionModel):
         return txt_feats.reshape(-1, len(text), txt_feats.shape[-1])
 
     def predict(self, x, profile=False, visualize=False, txt_feats=None, augment=False, embed=None):
-        """
-        Perform a forward pass through the model.
+        """Perform a forward pass through the model.
 
         Args:
             x (torch.Tensor): The input tensor.
@@ -1362,8 +943,7 @@ class WorldModel(DetectionModel):
         return x
 
     def loss(self, batch, preds=None):
-        """
-        Compute loss.
+        """Compute loss.
 
         Args:
             batch (dict): Batch to compute loss on.
@@ -1378,11 +958,10 @@ class WorldModel(DetectionModel):
 
 
 class YOLOEModel(DetectionModel):
-    """
-    YOLOE detection model.
+    """YOLOE detection model.
 
-    This class implements the YOLOE architecture for efficient object detection with text and visual prompts,
-    supporting both prompt-based and prompt-free inference modes.
+    This class implements the YOLOE architecture for efficient object detection with text and visual prompts, supporting
+    both prompt-based and prompt-free inference modes.
 
     Attributes:
         pe (torch.Tensor): Prompt embeddings for classes.
@@ -1406,8 +985,7 @@ class YOLOEModel(DetectionModel):
     """
 
     def __init__(self, cfg="yoloe-v8s.yaml", ch=3, nc=None, verbose=True):
-        """
-        Initialize YOLOE model with given config and parameters.
+        """Initialize YOLOE model with given config and parameters.
 
         Args:
             cfg (str | dict): Model configuration file path or dictionary.
@@ -1419,8 +997,7 @@ class YOLOEModel(DetectionModel):
 
     @smart_inference_mode()
     def get_text_pe(self, text, batch=80, cache_clip_model=False, without_reprta=False):
-        """
-        Set classes in advance so that model could do offline-inference without clip model.
+        """Set classes in advance so that model could do offline-inference without clip model.
 
         Args:
             text (list[str]): List of class names.
@@ -1452,8 +1029,7 @@ class YOLOEModel(DetectionModel):
 
     @smart_inference_mode()
     def get_visual_pe(self, img, visual):
-        """
-        Get visual embeddings.
+        """Get visual embeddings.
 
         Args:
             img (torch.Tensor): Input image tensor.
@@ -1465,8 +1041,7 @@ class YOLOEModel(DetectionModel):
         return self(img, vpe=visual, return_vpe=True)
 
     def set_vocab(self, vocab, names):
-        """
-        Set vocabulary for the prompt-free model.
+        """Set vocabulary for the prompt-free model.
 
         Args:
             vocab (nn.ModuleList): List of vocabulary items.
@@ -1494,8 +1069,7 @@ class YOLOEModel(DetectionModel):
         self.names = check_class_names(names)
 
     def get_vocab(self, names):
-        """
-        Get fused vocabulary layer from the model.
+        """Get fused vocabulary layer from the model.
 
         Args:
             names (list): List of class names.
@@ -1520,8 +1094,7 @@ class YOLOEModel(DetectionModel):
         return vocab
 
     def set_classes(self, names, embeddings):
-        """
-        Set classes in advance so that model could do offline-inference without clip model.
+        """Set classes in advance so that model could do offline-inference without clip model.
 
         Args:
             names (list[str]): List of class names.
@@ -1536,8 +1109,7 @@ class YOLOEModel(DetectionModel):
         self.names = check_class_names(names)
 
     def get_cls_pe(self, tpe, vpe):
-        """
-        Get class positional embeddings.
+        """Get class positional embeddings.
 
         Args:
             tpe (torch.Tensor, optional): Text positional embeddings.
@@ -1560,8 +1132,7 @@ class YOLOEModel(DetectionModel):
     def predict(
         self, x, profile=False, visualize=False, tpe=None, augment=False, embed=None, vpe=None, return_vpe=False
     ):
-        """
-        Perform a forward pass through the model.
+        """Perform a forward pass through the model.
 
         Args:
             x (torch.Tensor): The input tensor.
@@ -1608,8 +1179,7 @@ class YOLOEModel(DetectionModel):
         return x
 
     def loss(self, batch, preds=None):
-        """
-        Compute loss.
+        """Compute loss.
 
         Args:
             batch (dict): Batch to compute loss on.
@@ -1627,11 +1197,10 @@ class YOLOEModel(DetectionModel):
 
 
 class YOLOESegModel(YOLOEModel, SegmentationModel):
-    """
-    YOLOE segmentation model.
+    """YOLOE segmentation model.
 
-    This class extends YOLOEModel to handle instance segmentation tasks with text and visual prompts,
-    providing specialized loss computation for pixel-level object detection and segmentation.
+    This class extends YOLOEModel to handle instance segmentation tasks with text and visual prompts, providing
+    specialized loss computation for pixel-level object detection and segmentation.
 
     Methods:
         __init__: Initialize YOLOE segmentation model.
@@ -1644,8 +1213,7 @@ class YOLOESegModel(YOLOEModel, SegmentationModel):
     """
 
     def __init__(self, cfg="yoloe-v8s-seg.yaml", ch=3, nc=None, verbose=True):
-        """
-        Initialize YOLOE segmentation model with given config and parameters.
+        """Initialize YOLOE segmentation model with given config and parameters.
 
         Args:
             cfg (str | dict): Model configuration file path or dictionary.
@@ -1656,8 +1224,7 @@ class YOLOESegModel(YOLOEModel, SegmentationModel):
         super().__init__(cfg=cfg, ch=ch, nc=nc, verbose=verbose)
 
     def loss(self, batch, preds=None):
-        """
-        Compute loss.
+        """Compute loss.
 
         Args:
             batch (dict): Batch to compute loss on.
@@ -1675,11 +1242,10 @@ class YOLOESegModel(YOLOEModel, SegmentationModel):
 
 
 class Ensemble(torch.nn.ModuleList):
-    """
-    Ensemble of models.
+    """Ensemble of models.
 
-    This class allows combining multiple YOLO models into an ensemble for improved performance through
-    model averaging or other ensemble techniques.
+    This class allows combining multiple YOLO models into an ensemble for improved performance through model averaging
+    or other ensemble techniques.
 
     Methods:
         __init__: Initialize an ensemble of models.
@@ -1698,8 +1264,7 @@ class Ensemble(torch.nn.ModuleList):
         super().__init__()
 
     def forward(self, x, augment=False, profile=False, visualize=False):
-        """
-        Generate the YOLO network's final layer.
+        """Generate the YOLO network's final layer.
 
         Args:
             x (torch.Tensor): Input tensor.
@@ -1723,12 +1288,11 @@ class Ensemble(torch.nn.ModuleList):
 
 @contextlib.contextmanager
 def temporary_modules(modules=None, attributes=None):
-    """
-    Context manager for temporarily adding or modifying modules in Python's module cache (`sys.modules`).
+    """Context manager for temporarily adding or modifying modules in Python's module cache (`sys.modules`).
 
-    This function can be used to change the module paths during runtime. It's useful when refactoring code,
-    where you've moved a module from one location to another, but you still want to support the old import
-    paths for backwards compatibility.
+    This function can be used to change the module paths during runtime. It's useful when refactoring code, where you've
+    moved a module from one location to another, but you still want to support the old import paths for backwards
+    compatibility.
 
     Args:
         modules (dict, optional): A dictionary mapping old module paths to new module paths.
@@ -1739,7 +1303,7 @@ def temporary_modules(modules=None, attributes=None):
         >>> import old.module  # this will now import new.module
         >>> from old.module import attribute  # this will now import new.module.attribute
 
-    Note:
+    Notes:
         The changes are only in effect inside the context manager and are undone once the context manager exits.
         Be aware that directly manipulating `sys.modules` can lead to unpredictable results, especially in larger
         applications or libraries. Use this function with caution.
@@ -1786,8 +1350,7 @@ class SafeUnpickler(pickle.Unpickler):
     """Custom Unpickler that replaces unknown classes with SafeClass."""
 
     def find_class(self, module, name):
-        """
-        Attempt to find a class, returning SafeClass if not among safe modules.
+        """Attempt to find a class, returning SafeClass if not among safe modules.
 
         Args:
             module (str): Module name.
@@ -1812,10 +1375,9 @@ class SafeUnpickler(pickle.Unpickler):
 
 
 def torch_safe_load(weight, safe_only=False):
-    """
-    Attempt to load a PyTorch model with the torch.load() function. If a ModuleNotFoundError is raised, it catches the
-    error, logs a warning message, and attempts to install the missing module via the check_requirements() function.
-    After installation, the function again attempts to load the model using torch.load().
+    """Attempt to load a PyTorch model with the torch.load() function. If a ModuleNotFoundError is raised, it catches
+    the error, logs a warning message, and attempts to install the missing module via the check_requirements()
+    function. After installation, the function again attempts to load the model using torch.load().
 
     Args:
         weight (str): The file path of the PyTorch model.
@@ -1894,8 +1456,7 @@ def torch_safe_load(weight, safe_only=False):
 
 
 def load_checkpoint(weight, device=None, inplace=True, fuse=False):
-    """
-    Load a single model weights.
+    """Load a single model weights.
 
     Args:
         weight (str | Path): Model weight path.
@@ -1932,8 +1493,7 @@ def load_checkpoint(weight, device=None, inplace=True, fuse=False):
 
 
 def parse_model(d, ch, verbose=True):
-    """
-    Parse a YOLO model.yaml dictionary into a PyTorch model.
+    """Parse a YOLO model.yaml dictionary into a PyTorch model.
 
     Args:
         d (dict): Model dictionary.
@@ -1954,7 +1514,7 @@ def parse_model(d, ch, verbose=True):
     scale = d.get("scale")
     if scales:
         if not scale:
-            scale = tuple(scales.keys())[0]
+            scale = next(iter(scales.keys()))
             LOGGER.warning(f"no model scale passed. Assuming scale='{scale}'.")
         depth, width, max_channels = scales[scale]
 
@@ -2074,12 +1634,12 @@ def parse_model(d, ch, verbose=True):
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
         elif m in frozenset(
-            {Detect, WorldDetect, YOLOEDetect, Segment, YOLOESegment, Pose, OBB, ImagePoolingAttn, v10Detect}
+            {Detect, Heatmap, WorldDetect, YOLOEDetect, Segment, YOLOESegment, Pose, OBB, ImagePoolingAttn, v10Detect}
         ):
             args.append([ch[x] for x in f])
             if m is Segment or m is YOLOESegment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
-            if m in {Detect, YOLOEDetect, Segment, YOLOESegment, Pose, OBB}:
+            if m in {Detect, Heatmap, YOLOEDetect, Segment, YOLOESegment, Pose, OBB}:
                 m.legacy = legacy
         elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
@@ -2095,24 +1655,25 @@ def parse_model(d, ch, verbose=True):
             args = [*args[1:]]
         else:
             c2 = ch[f]
-
+        
         m_ = torch.nn.Sequential(*(m(*args) for _ in range(n))) if n > 1 else m(*args)  # module
         t = str(m)[8:-2].replace("__main__.", "")  # module type
         m_.np = sum(x.numel() for x in m_.parameters())  # number params
         m_.i, m_.f, m_.type = i, f, t  # attach index, 'from' index, type
         if verbose:
-            LOGGER.info(f"{i:>3}{str(f):>20}{n_:>3}{m_.np:10.0f}  {t:<45}{str(args):<30}")  # print
+            LOGGER.info(f"{i:>3}{f!s:>20}{n_:>3}{m_.np:10.0f}  {t:<45}{args!s:<30}")  # print
         save.extend(x % i for x in ([f] if isinstance(f, int) else f) if x != -1)  # append to savelist
         layers.append(m_)
         if i == 0:
             ch = []
         ch.append(c2)
+
+    
     return torch.nn.Sequential(*layers), sorted(save)
 
 
 def yaml_model_load(path):
-    """
-    Load a YOLOv8 model from a YAML file.
+    """Load a YOLOv8 model from a YAML file.
 
     Args:
         path (str | Path): Path to the YAML file.
@@ -2135,8 +1696,7 @@ def yaml_model_load(path):
 
 
 def guess_model_scale(model_path):
-    """
-    Extract the size character n, s, m, l, or x of the model's scale from the model path.
+    """Extract the size character n, s, m, l, or x of the model's scale from the model path.
 
     Args:
         model_path (str | Path): The path to the YOLO model's YAML file.
@@ -2145,14 +1705,13 @@ def guess_model_scale(model_path):
         (str): The size character of the model's scale (n, s, m, l, or x).
     """
     try:
-        return re.search(r"yolo(e-)?[v]?\d+([nslmx])", Path(model_path).stem).group(2)  # noqa
+        return re.search(r"yolo(e-)?[v]?\d+([nslmx])", Path(model_path).stem).group(2)
     except AttributeError:
         return ""
 
 
 def guess_model_task(model):
-    """
-    Guess the task of a PyTorch model from its architecture or configuration.
+    """Guess the task of a PyTorch model from its architecture or configuration.
 
     Args:
         model (torch.nn.Module | dict): PyTorch model or model configuration in YAML format.
@@ -2168,6 +1727,8 @@ def guess_model_task(model):
             return "classify"
         if "detect" in m:
             return "detect"
+        if "heatmap" in m:
+            return 'heatmap'
         if "segment" in m:
             return "segment"
         if m == "pose":

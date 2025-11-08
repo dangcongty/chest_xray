@@ -1,23 +1,30 @@
 from ultralytics import YOLO
 
-model = YOLO('ultralytics/cfg/models/11/yolo11x-p2.yaml')
-# model = YOLO('runs/detect/train23/weights/best.pt')
-model.train(data = '/media/ssd220/ty/xray/datasets/dataset.yaml', 
+# model = YOLO('ultralytics/cfg/models/11/yolo11n-hm.yaml')
+model = YOLO('ultralytics/cfg/models/11/yolo11n.yaml')
+model.train(data='/home/ty/Desktop/Project/x_ray_chest/datasets/data.yaml',
             # hyp
             epochs = 500,
             imgsz = 640,
-            batch = 4,
+            batch = 16,
             cos_lr = True,
+            multi_scale = False,
+            # single_cls = True,
 
             # loss
             box = 7.5,
-            # cls = 0.5,
-            cls = 5,
+            cls = 0.5,
             dfl = 1.5,
+            hm = 1,
+            # cls = 5,
+            lr0 = 0.1,
+            lrf = 0.1,
+
+            # optimizer='Adam',
 
             # others
-            device = 'cuda:1',
-            # name = 'local_ct_5',
+            device = 'cuda:0',
+            name = 'dev',
             plots = True,
             resume = False,
             exist_ok = False,
@@ -28,11 +35,12 @@ model.train(data = '/media/ssd220/ty/xray/datasets/dataset.yaml',
             mixup = 0,
             hsv_v = 0.1,
             # affine transforms
-            scale = 0.2, # mô phỏng vị trí gần - xa máy chụp
-            degrees = 5,
+            scale = 0.2, 
+            degrees = 10,
             translate = 0.2,
+            flipud = 0.5,
+            cutmix = 0.2
+
             
-            # contrastive
-            use_contrastive = True,
-            use_conf_aware = False
+            
             )
