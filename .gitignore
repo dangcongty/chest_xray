@@ -18,3 +18,9 @@ runs/
 .vscode/
 lung_seg/
 *.deb
+ckpt/
+*.json
+*.png
+*.txt
+
+__pycache__/

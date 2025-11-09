@@ -1,8 +1,8 @@
 from ultralytics import YOLO
 
-# model = YOLO('ultralytics/cfg/models/11/yolo11n-hm.yaml')
-model = YOLO('ultralytics/cfg/models/11/yolo11n.yaml')
-model.train(data='/home/ty/Desktop/Project/x_ray_chest/datasets/data.yaml',
+model = YOLO('ultralytics/cfg/models/11/yolo11n-hm.yaml')
+# model = YOLO('ultralytics/cfg/models/11/yolo11n.yaml')
+model.train(data='/media/ssd220/ty/xray/datasets/dataset.yaml',
             # hyp
             epochs = 500,
             imgsz = 640,
@@ -15,7 +15,7 @@ model.train(data='/home/ty/Desktop/Project/x_ray_chest/datasets/data.yaml',
             box = 7.5,
             cls = 0.5,
             dfl = 1.5,
-            hm = 1,
+            hm = 5,
             # cls = 5,
             lr0 = 0.1,
             lrf = 0.1,
@@ -24,7 +24,7 @@ model.train(data='/home/ty/Desktop/Project/x_ray_chest/datasets/data.yaml',
 
             # others
             device = 'cuda:0',
-            name = 'dev',
+            name = 'heatmap_09102025_',
             plots = True,
             resume = False,
             exist_ok = False,

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from multiprocessing.pool import ThreadPool
 from pathlib import Path
 from typing import Any
 
+import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -110,8 +112,18 @@ class HeatmapValidator(DetectionValidator):
             - If `overlap` is True and `masks` is True, overlapping masks are taken into account when computing IoU.
         """
         tp = super()._process_batch(preds, batch)
-        mse = (((preds["heatmaps"] - batch["heatmaps"])**2).sum()/torch.count_nonzero(batch["heatmaps"])).cpu().numpy().reshape(1)
+        if torch.count_nonzero(batch["heatmaps"]):
+            mse = (((preds["heatmaps"] - batch["heatmaps"])**2).sum()/torch.count_nonzero(batch["heatmaps"])).cpu().numpy().reshape(1)
+        else:
+            mse = (((preds["heatmaps"] - batch["heatmaps"])**2).sum()).cpu().numpy().reshape(1)
         tp.update({"mse": mse})  # update tp with mask IoU
+        
+        if self.seen < 5:
+            b = (batch["heatmaps"][:84*84].reshape((84, 84)).cpu().numpy())*1000
+            a = (preds["heatmaps"][0][:84*84].reshape((84, 84)).cpu().numpy())*1000
+            os.makedirs(f'runs/heatmap/{self.args.name}/vis_heat/', exist_ok=True)
+            cv2.imwrite(f'runs/heatmap/{self.args.name}/vis_heat/{self.seen}.jpg', np.hstack([a, b]))
+        
         return tp
 
     def plot_predictions(self, batch: dict[str, Any], preds: list[dict[str, torch.Tensor]], ni: int) -> None:
