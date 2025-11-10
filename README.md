@@ -9,3 +9,8 @@
 ## [Update 09/11/2025]
 * Add visualize heatmap
 * Handle inf heatmap loss/mse
+
+## [Update 10/11/2025]
+* Transfer YOLO weight to Heatmap
+* Adjusting loss Heatmap to 'mean'
+
