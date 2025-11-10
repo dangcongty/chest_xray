@@ -24,3 +24,7 @@ ckpt/
 *.txt
 
 __pycache__/
+/train.py
+/val.py
+/train_heatmap.py
+/.~lock*

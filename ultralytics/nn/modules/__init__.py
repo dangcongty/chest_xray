@@ -81,6 +81,7 @@ from .head import (
     Classify,
     Detect,
     Heatmap,
+    HeatmapAttention,
     LRPCHead,
     Pose,
     RTDETRDecoder,

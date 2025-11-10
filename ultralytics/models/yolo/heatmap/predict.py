@@ -46,35 +46,33 @@ class HeatmapPredictor(DetectionPredictor):
     def postprocess(self, preds, img, orig_imgs):
         return super().postprocess(preds[0], img, orig_imgs)
 
-    def construct_results(self, preds, img, orig_imgs, protos):
-        return [
-            self.construct_result(pred, img, orig_img, img_path, proto)
-            for pred, orig_img, img_path, proto in zip(preds, orig_imgs, self.batch[0], protos)
-        ]
-
-    def construct_result(self, pred, img, orig_img, img_path, proto):
-        """Construct a single result object from the prediction.
+    def construct_results(self, preds, img, orig_imgs):
+        """Construct a list of Results objects from model predictions.
 
         Args:
-            pred (torch.Tensor): The predicted bounding boxes, scores, and masks.
-            img (torch.Tensor): The image after preprocessing.
-            orig_img (np.ndarray): The original image before preprocessing.
-            img_path (str): The path to the original image.
-            proto (torch.Tensor): The prototype masks.
+            preds (list[torch.Tensor]): List of predicted bounding boxes and scores for each image.
+            img (torch.Tensor): Batch of preprocessed images used for inference.
+            orig_imgs (list[np.ndarray]): List of original images before preprocessing.
 
         Returns:
-            (Results): Result object containing the original image, image path, class names, bounding boxes, and masks.
+            (list[Results]): List of Results objects containing detection information for each image.
         """
-        if pred.shape[0] == 0:  # save empty boxes
-            masks = None
-        elif self.args.retina_masks:
-            pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
-            masks = ops.process_mask_native(proto, pred[:, 6:], pred[:, :4], orig_img.shape[:2])  # HWC
-        else:
-            masks = ops.process_mask(proto, pred[:, 6:], pred[:, :4], img.shape[2:], upsample=True)  # HWC
-            pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
-        if masks is not None:
-            keep = masks.amax((-2, -1)) > 0  # only keep predictions with masks
-            if not all(keep):  # most predictions have masks
-                pred, masks = pred[keep], masks[keep]  # indexing is slow
-        return Results(orig_img, path=img_path, names=self.model.names, boxes=pred[:, :6], masks=masks)
+        return [
+            self.construct_result(pred, img, orig_img, img_path)
+            for pred, orig_img, img_path in zip(preds, orig_imgs, self.batch[0])
+        ]
+
+    def construct_result(self, pred, img, orig_img, img_path):
+        """Construct a single Results object from one image prediction.
+
+        Args:
+            pred (torch.Tensor): Predicted boxes and scores with shape (N, 6) where N is the number of detections.
+            img (torch.Tensor): Preprocessed image tensor used for inference.
+            orig_img (np.ndarray): Original image before preprocessing.
+            img_path (str): Path to the original image file.
+
+        Returns:
+            (Results): Results object containing the original image, image path, class names, and scaled bounding boxes.
+        """
+        pred[:, :4] = ops.scale_boxes(img.shape[2:], pred[:, :4], orig_img.shape)
+        return Results(orig_img, path=img_path, names=self.model.names, boxes=pred[:, :6])

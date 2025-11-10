@@ -14,4 +14,5 @@
 * Transfer YOLO weight to Heatmap
 * Adjusting loss Heatmap to 'mean'
 * Fix metrics Heatmap 
-
+* Fix prediction Heatmap 
+* Add HeatmapAttention

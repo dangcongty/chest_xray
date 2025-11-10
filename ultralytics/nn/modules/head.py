@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import math
 
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -1215,5 +1216,52 @@ class Heatmap(Detect):
         x = Detect.forward(self, x)
         if self.training:
             return x, heatmap
-        # return (torch.cat([x[0], heatmap], 1), (x[1], heatmap))
         return x, heatmap
+
+class HeatmapAttention(Detect):
+    def __init__(self, nc: int = 80, ch: tuple = ()):
+        """
+        Args:
+            nc (int): Number of classes.
+            ch (tuple): Tuple of channel sizes from backbone feature maps.
+        """
+        super().__init__(nc, ch)
+
+        c4 = ch[0] // 4
+        self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, 1, 1)) for x in ch)
+
+    def forward(self, x: list[torch.Tensor]) -> tuple | list[torch.Tensor]:
+        bs = x[0].shape[0]  # batch size
+        heatmaps = [self.cv4[i](x[i]) for i in range(self.nl)]
+
+        x_attentions = []
+        for _x, hm in zip(x, heatmaps):
+            x_attentions.append(_x * hm)
+
+        x = Detect.forward(self, x_attentions)
+        if self.training:
+            return x, torch.cat([hm.view((bs, 1, -1)) for hm in heatmaps], 2)
+        return x, torch.cat([hm.view((bs, 1, -1)) for hm in heatmaps], 2)
+
+
+def plot_feature_map_sum(feature_map):
+    """
+    Sums across channels of a feature map [1, C, H, W] and plots the result.
+
+    Args:
+        feature_map (torch.Tensor): Tensor of shape [1, C, H, W].
+    """
+    assert feature_map.ndim == 4 and feature_map.shape[0] == 1, \
+        f"Expected input shape [1, C, H, W], got {feature_map.shape}"
+
+    # Sum across channels -> [1, H, W]
+    summed = feature_map.sum(dim=1).squeeze(0)
+
+    plt.figure(figsize=(5, 5))
+    plt.imshow(summed.detach().cpu().numpy(), cmap='viridis')
+    plt.colorbar(label='Sum of Channels')
+    plt.title("Summed Feature Map")
+    plt.axis('off')
+    plt.show()
+
+    return summed
