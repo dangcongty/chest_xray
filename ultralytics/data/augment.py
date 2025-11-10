@@ -666,16 +666,18 @@ class Mosaic(BaseMixTransform):
             img = labels_patch["img"]
             h, w = labels_patch.pop("resized_shape")
             
-            heatmaps = labels_patch.pop("heatmaps", img[..., 0])
+            heatmaps = labels_patch.get("heatmaps", img[..., 0])
 
-            if len(heatmaps):
+            if not isinstance(heatmaps, bool):
                 hm_h, hm_w = heatmaps.shape
                 img_h, img_w = img.shape[:2]
                 if (hm_h != img_h) or (hm_w != img_w):
                     scale_y = img_h / hm_h
                     scale_x = img_w / hm_w
                     heatmaps = zoom(heatmaps, (scale_y, scale_x), order=1)  # order=1 -> bilinear interpolation
-
+            else:
+                heatmaps = img[..., 0]
+                
             # Place img in img4
             if i == 0:  # top left
                 img4 = np.full((s * 2, s * 2, img.shape[2]), 114, dtype=np.uint8)  # base image with 4 tiles

@@ -911,10 +911,11 @@ class HeatmapLoss:
 
     def cal_heatmap_loss(self, outs, gts):
         outs = outs.squeeze()
-        if torch.count_nonzero(gts):
-            loss = self.mse(outs, gts).sum()/torch.count_nonzero(gts)
-        else:
-            loss = self.mse(outs, gts).sum()
+        loss = self.mse(outs, gts).mean()
+        # if torch.count_nonzero(gts):
+        #     loss = self.mse(outs, gts).sum()/torch.count_nonzero(gts)
+        # else:
+        #     loss = self.mse(outs, gts).sum()
         return loss
     
     def __call__(self, preds: Any, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
