@@ -13,4 +13,4 @@
 ## [Update 10/11/2025]
 * Transfer YOLO weight to Heatmap
 * Adjusting loss Heatmap to 'mean'
-
+* Fix metrics Heatmap 

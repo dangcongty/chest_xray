@@ -134,11 +134,6 @@ class HeatmapValidator(DetectionValidator):
             preds (list[dict[str, torch.Tensor]]): List of predictions from the model.
             ni (int): Batch index.
         """
-        for p in preds:
-            masks = p["masks"]
-            if masks.shape[0] > self.args.max_det:
-                LOGGER.warning(f"Limiting validation plots to 'max_det={self.args.max_det}' items.")
-            p["masks"] = torch.as_tensor(masks[: self.args.max_det], dtype=torch.uint8).cpu()
         super().plot_predictions(batch, preds, ni, max_det=self.args.max_det)  # plot bboxes
 
     def save_one_txt(self, predn: torch.Tensor, save_conf: bool, shape: tuple[int, int], file: Path) -> None:

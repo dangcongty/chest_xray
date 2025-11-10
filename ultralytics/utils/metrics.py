@@ -1566,9 +1566,9 @@ class OBBMetrics(DetMetrics):
 class HeatmapMetrics(DetMetrics):
     def __init__(self, names: dict[int, str] = {}) -> None:
         DetMetrics.__init__(self, names)
-        self.seg = Metric()
         self.task = "heatmap"
         self.stats["mse"] = []  # add additional stats for heatmap
+        self.mse = 0
 
     def process(self, save_dir: Path = Path("."), plot: bool = False, on_plot=None) -> dict[str, np.ndarray]:
         """Process the detection and segmentation metrics over the given set of predictions.
@@ -1582,6 +1582,7 @@ class HeatmapMetrics(DetMetrics):
             (dict[str, np.ndarray]): Dictionary containing concatenated statistics arrays.
         """
         stats = DetMetrics.process(self, save_dir, plot, on_plot=on_plot)  # process box stats
+        self.mse = np.mean(stats['mse'])
         return stats
 
     @property
@@ -1589,45 +1590,37 @@ class HeatmapMetrics(DetMetrics):
         """Return a list of keys for accessing metrics."""
         return [
             *DetMetrics.keys.fget(self),
-            "metrics/precision(M)",
-            "metrics/recall(M)",
-            "metrics/mAP50(M)",
-            "metrics/mAP50-95(M)",
+            "MSE"
         ]
 
     def mean_results(self) -> list[float]:
         """Return the mean metrics for bounding box and segmentation results."""
-        return DetMetrics.mean_results(self) + self.seg.mean_results()
+        return DetMetrics.mean_results(self) + [self.mse]
 
     def class_result(self, i: int) -> list[float]:
         """Return classification results for a specified class index."""
-        return DetMetrics.class_result(self, i) + self.seg.class_result(i)
+        return DetMetrics.class_result(self, i) +  (self.mse,)
 
     @property
     def maps(self) -> np.ndarray:
         """Return mAP scores for object detection and semantic segmentation models."""
-        return DetMetrics.maps.fget(self) + self.seg.maps
-
+        return DetMetrics.maps.fget(self)
     @property
     def fitness(self) -> float:
         """Return the fitness score for both segmentation and bounding box models."""
-        return self.seg.fitness() + DetMetrics.fitness.fget(self)
+        return DetMetrics.fitness.fget(self)
 
     @property
     def curves(self) -> list[str]:
         """Return a list of curves for accessing specific metrics curves."""
         return [
             *DetMetrics.curves.fget(self),
-            "Precision-Recall(M)",
-            "F1-Confidence(M)",
-            "Precision-Confidence(M)",
-            "Recall-Confidence(M)",
         ]
 
     @property
     def curves_results(self) -> list[list]:
         """Return a list of computed performance metrics and statistics."""
-        return DetMetrics.curves_results.fget(self) + self.seg.curves_results
+        return DetMetrics.curves_results.fget(self)
 
     def summary(self, normalize: bool = True, decimals: int = 5) -> list[dict[str, Any]]:
         """Generate a summarized representation of per-class segmentation metrics as a list of dictionaries. Includes
@@ -1647,12 +1640,5 @@ class HeatmapMetrics(DetMetrics):
             >>> seg_summary = results.summary(decimals=4)
             >>> print(seg_summary)
         """
-        per_class = {
-            "Mask-P": self.seg.p,
-            "Mask-R": self.seg.r,
-            "Mask-F1": self.seg.f1,
-        }
         summary = DetMetrics.summary(self, normalize, decimals)  # get box summary
-        for i, s in enumerate(summary):
-            s.update({**{k: round(v[i], decimals) for k, v in per_class.items()}})
         return summary

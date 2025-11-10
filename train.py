@@ -2,11 +2,11 @@ import os
 
 from ultralytics import YOLO
 
-model_path = 'ultralytics/cfg/models/11/yolo11n.pt'
+model_path = 'ultralytics/cfg/models/11/yolo11-hm.yaml'
 model = YOLO(model_path)
-model.train(data='/media/ssd220/ty/xray/datasets/dataset.yaml',
+model.train(data='/home/ty/Desktop/Project/x_ray_chest/datasets/data.yaml',
             # hyp
-            epochs = 500,
+            epochs = 1,
             imgsz = 640,
             batch = 16,
             cos_lr = True,
@@ -25,7 +25,7 @@ model.train(data='/media/ssd220/ty/xray/datasets/dataset.yaml',
             # optimizer='Adam',
 
             # others
-            device = 'cuda:1',
+            device = 'cpu',
             name = f'yolo_{os.path.basename(model_path)}',
             plots = True,
             resume = False,
