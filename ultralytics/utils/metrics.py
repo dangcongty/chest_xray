@@ -396,7 +396,7 @@ class ConfusionMatrix(DataExportMixin):
         no_pred = detections["cls"].shape[0] == 0
         if gt_cls.shape[0] == 0:  # Check if labels is empty
             if not no_pred:
-                detections = {k: detections[k][detections["conf"] > conf] for k in detections}
+                detections = {k: detections[k][detections["conf"] > conf] for k in detections if k != 'heatmaps'}
                 detection_classes = detections["cls"].int().tolist()
                 for i, dc in enumerate(detection_classes):
                     self.matrix[dc, self.nc] += 1  # FP
@@ -409,7 +409,7 @@ class ConfusionMatrix(DataExportMixin):
                 self._append_matches("FN", batch, i)
             return
 
-        detections = {k: detections[k][detections["conf"] > conf] for k in detections}
+        detections = {k: detections[k][detections["conf"] > conf] for k in detections if k != 'heatmaps'}
         gt_classes = gt_cls.int().tolist()
         detection_classes = detections["cls"].int().tolist()
         bboxes = detections["bboxes"]
