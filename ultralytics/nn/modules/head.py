@@ -10,6 +10,7 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from timm.models.vision_transformer import VisionTransformer
 from torch.nn.init import constant_, xavier_uniform_
 
 from ultralytics.utils import NOT_MACOS14
@@ -28,6 +29,7 @@ from .block import (
     Proto,
     Residual,
     SwiGLUFFN,
+    ViTBlock,
 )
 from .conv import Conv, DWConv
 from .transformer import (
@@ -1218,6 +1220,8 @@ class Heatmap(Detect):
             return x, heatmap
         return x, heatmap
 
+
+
 class HeatmapAttention(Detect):
     def __init__(self, nc: int = 80, ch: tuple = ()):
         """
@@ -1227,16 +1231,19 @@ class HeatmapAttention(Detect):
         """
         super().__init__(nc, ch)
 
-        c4 = ch[0] // 4
-        self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, 1, 1)) for x in ch)
+        sizes = (80, 40, 20)
+        # self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, 1, 1)) for x in ch)
+        patch_sizes = [8, 4, 2]
+        self.cv4 = nn.ModuleList(
+            ViTBlock(in_channels=c, dim=c, patch_size=ps)  # set dim=in_channels for residual
+            for c, ps in zip(ch, patch_sizes)
+        )
 
     def forward(self, x: list[torch.Tensor]) -> tuple | list[torch.Tensor]:
         bs = x[0].shape[0]  # batch size
         heatmaps = [self.cv4[i](x[i]) for i in range(self.nl)]
 
-        x_attentions = []
-        for _x, hm in zip(x, heatmaps):
-            x_attentions.append(_x * hm)
+        x_attentions = [_x * hm for _x, hm in zip(x, heatmaps)]
 
         x = Detect.forward(self, x_attentions)
         if self.training:

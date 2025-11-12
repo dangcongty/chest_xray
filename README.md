@@ -16,3 +16,6 @@
 * Fix metrics Heatmap 
 * Fix prediction Heatmap 
 * Add HeatmapAttention
+
+## [Update 12/11/2025]
+* Change Attention layer to Transformer/ViT

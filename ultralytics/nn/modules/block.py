@@ -52,6 +52,7 @@ __all__ = (
     "ResNetLayer",
     "SCDown",
     "TorchVision",
+    "ViTBlock",
 )
 
 
@@ -1943,3 +1944,72 @@ class SAVPE(nn.Module):
         aggregated = score.transpose(-2, -3) @ x.reshape(B, self.c, C // self.c, -1).transpose(-1, -2)
 
         return F.normalize(aggregated.transpose(-2, -3).reshape(B, Q, -1), dim=-1, p=2)
+
+
+
+class ViTBlock(nn.Module):
+    def __init__(self, dim=64, patch_size=8, num_heads=8, depth=1, img_size=80):
+        super().__init__()
+        self.patch_size = patch_size
+        self.dim = dim
+        self.img_size = img_size
+
+        num_patches = (img_size // patch_size) ** 2
+
+        # Patch embedding: Conv2d for patchifying
+        self.proj = nn.Conv2d(dim, dim, kernel_size=patch_size, stride=patch_size)
+
+        # Positional embedding
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, dim))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
+
+        # Transformer encoder (includes internal LayerNorm)
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=dim,
+            nhead=num_heads,
+            dim_feedforward=dim * 4,
+            dropout=0.1,
+            batch_first=True,
+            norm_first=True,  # ensures pre-norm like ViT
+        )
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=depth)
+
+        # Final normalization (common in ViT)
+        self.norm = nn.LayerNorm(dim)
+
+        # Reconstruction (unpatchify)
+        self.reconstruct = nn.ConvTranspose2d(
+            dim, dim, kernel_size=patch_size, stride=patch_size
+        )
+        self.last = nn.Conv2d(dim, 1, kernel_size=1, stride=1)
+
+        # Optional residual connection
+        self.residual = True
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+        x = F.interpolate(x, size=(self.img_size, self.img_size), mode='bilinear', align_corners=False)
+        identity = x
+
+        # Patchify
+        x_p = self.proj(x)  # [B, C, H/patch, W/patch]
+        H_p, W_p = x_p.shape[2:]
+        N = H_p * W_p
+        x_flat = x_p.flatten(2).transpose(1, 2)  # [B, N, C]
+
+        # Add positional embeddings
+        x_flat = x_flat + self.pos_embed[:, :N, :]
+
+        # Transformer encoder
+        x_t = self.transformer(x_flat)
+        x_t = self.norm(x_t)  # normalize output tokens
+
+        # Unpatchify
+        x_t = x_t.transpose(1, 2).reshape(B, C, H_p, W_p)
+        out = self.reconstruct(x_t)  # [B, C, H, W]
+
+        # Optional skip connection
+        out = out + identity
+        out = self.last(out)
+
+        return torch.sigmoid(F.interpolate(out, size=(H, W), mode='bilinear', align_corners=False))
