@@ -19,3 +19,4 @@
 
 ## [Update 12/11/2025]
 * Change Attention layer to Transformer/ViT
+* Add AdaptiveWing Loss

@@ -857,6 +857,71 @@ class TVPSegmentLoss(TVPDetectLoss):
         return cls_loss, vp_loss[1]
 
 
+class AdaptiveWingLoss(nn.Module):
+    """
+    Adaptive Wing Loss - Very robust for localization tasks
+    Combines smooth L1 loss characteristics with adaptive weighting
+    Paper: "Adaptive Wing Loss for Robust Face Alignment via Heatmap Regression"
+    
+    Hyperparameter Guide:
+    ---------------------
+    omega: Controls the loss curvature (nonlinearity strength)
+           - Small objects: 10-12 (less penalty)
+           - Medium objects: 14-16 (default, balanced)
+           - Large objects: 18-20 (more penalty)
+           - Higher omega = steeper loss curve = stricter on errors
+    
+    theta: Threshold between smooth and linear regions
+           - Precise localization: 0.3-0.5 (default)
+           - Tolerant to noise: 0.6-1.0
+           - Very strict: 0.1-0.3
+           - Smaller theta = more pixels treated as hard examples
+    
+    epsilon: Smoothness parameter (numerical stability)
+             - Keep at 1.0 for most cases
+             - Increase to 2.0 if training is unstable
+             - Decrease to 0.5 for very precise tasks
+    
+    alpha: Adaptive parameter (controls target-dependent behavior)
+           - High precision needed: 2.1-2.5 (default)
+           - Moderate precision: 1.5-2.0
+           - Background-heavy: 2.5-3.0
+           - Higher alpha = more adaptive to target values
+    
+    Common Presets:
+    ---------------
+    Small objects (< 32px): omega=10, theta=0.3, epsilon=1, alpha=2.1
+    Medium objects (32-64px): omega=14, theta=0.5, epsilon=1, alpha=2.1 (DEFAULT)
+    Large objects (> 64px): omega=18, theta=0.7, epsilon=1, alpha=2.0
+    Noisy data: omega=12, theta=0.8, epsilon=2, alpha=1.8
+    High precision: omega=16, theta=0.3, epsilon=0.5, alpha=2.5
+    """
+    def __init__(self, omega=14, theta=0.5, epsilon=1, alpha=2.1):
+        super(AdaptiveWingLoss, self).__init__()
+        self.omega = omega
+        self.theta = theta
+        self.epsilon = epsilon
+        self.alpha = alpha
+        
+    def forward(self, pred, target):
+        """
+        pred: predicted heatmap
+        target: ground truth heatmap
+        """
+        delta = (target - pred).abs()
+        
+        A = self.omega * (1 / (1 + torch.pow(self.theta / self.epsilon, self.alpha - target))) * \
+            (self.alpha - target) * torch.pow(self.theta / self.epsilon, self.alpha - target - 1) * \
+            (1 / self.epsilon)
+        C = self.theta * A - self.omega * torch.log(1 + torch.pow(self.theta / self.epsilon, self.alpha - target))
+        
+        losses = torch.where(
+            delta < self.theta,
+            self.omega * torch.log(1 + torch.pow(delta / self.epsilon, self.alpha - target)),
+            A * delta - C
+        )
+        
+        return losses.mean()
 
 class HeatmapLoss:
     """Criterion class for computing training losses for YOLOv8 object detection."""
@@ -881,7 +946,7 @@ class HeatmapLoss:
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
-        self.mse = nn.MSELoss(reduction='none')
+        self.hm_loss = AdaptiveWingLoss()
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
         """Preprocess targets by converting to tensor format and scaling coordinates."""
@@ -911,7 +976,7 @@ class HeatmapLoss:
 
     def cal_heatmap_loss(self, outs, gts):
         outs = outs.squeeze()
-        loss = self.mse(outs, gts).mean()
+        loss = self.hm_loss(outs, gts).mean()
         # if torch.count_nonzero(gts):
         #     loss = self.mse(outs, gts).sum()/torch.count_nonzero(gts)
         # else:
