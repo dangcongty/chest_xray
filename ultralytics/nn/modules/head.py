@@ -1235,8 +1235,8 @@ class HeatmapAttention(Detect):
         # self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, 1, 1)) for x in ch)
         patch_sizes = [8, 4, 2]
         self.cv4 = nn.ModuleList(
-            ViTBlock(in_channels=c, dim=c, patch_size=ps)  # set dim=in_channels for residual
-            for c, ps in zip(ch, patch_sizes)
+            ViTBlock(dim=c, patch_size=ps, img_size=size)  # set dim=in_channels for residual
+            for c, ps, size in zip(ch, patch_sizes, sizes)
         )
 
     def forward(self, x: list[torch.Tensor]) -> tuple | list[torch.Tensor]:
