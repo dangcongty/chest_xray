@@ -24,3 +24,4 @@
 
 ## [Update 13/11/2025]
 * Add more layer to heatmap
+* Remove 'rect' valuation
