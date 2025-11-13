@@ -24,6 +24,7 @@ from ultralytics.utils.torch_utils import (
 from .block import (
     DFL,
     SAVPE,
+    AAttn,
     BNContrastiveHead,
     ContrastiveHead,
     Proto,
@@ -1232,13 +1233,24 @@ class HeatmapAttention(Detect):
         super().__init__(nc, ch)
 
         c4 = ch[0] // 4
-        self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, 1, 1)) for x in ch)
+        # self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, 1, 1)) for x in ch)
         # sizes = (80, 40, 20)
         # patch_sizes = [8, 4, 2]
         # self.cv4 = nn.ModuleList(
         #     ViTBlock(dim=c, patch_size=ps, img_size=size)  # set dim=in_channels for residual
         #     for c, ps, size in zip(ch, patch_sizes, sizes)
         # )
+
+        self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3, 2, 1), 
+                                               Conv(c4, c4, 3, 2, 1), 
+                                               AAttn(c4, 8, 1), 
+                                               AAttn(c4, 8, 1), 
+                                               nn.Upsample(scale_factor=2),
+                                               Conv(c4, c4, 3), 
+                                               nn.Upsample(scale_factor=2),
+                                               Conv(c4, c4, 3), 
+                                               nn.Conv2d(c4, 1, 1)) for x in ch)
+
 
     def forward(self, x: list[torch.Tensor]) -> tuple | list[torch.Tensor]:
         bs = x[0].shape[0]  # batch size
