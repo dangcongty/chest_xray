@@ -24,3 +24,10 @@
 
 ## [Update 13/11/2025]
 * Add more layer to heatmap
+
+## [Update 14/11/2025]
+* Add sigmoid Heatmap
+* Add focal loss
+* Heatmap loss = mse + focal
+* Sigma heatmap change from 0.3 -> 0.2
+* Update valiation MSE

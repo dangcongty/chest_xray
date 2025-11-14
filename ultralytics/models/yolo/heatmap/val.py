@@ -112,10 +112,12 @@ class HeatmapValidator(DetectionValidator):
             - If `overlap` is True and `masks` is True, overlapping masks are taken into account when computing IoU.
         """
         tp = super()._process_batch(preds, batch)
-        if torch.count_nonzero(batch["heatmaps"]):
-            mse = (((preds["heatmaps"] - batch["heatmaps"])**2).sum()/torch.count_nonzero(batch["heatmaps"])).cpu().numpy().reshape(1)
-        else:
-            mse = (((preds["heatmaps"] - batch["heatmaps"])**2).sum()).cpu().numpy().reshape(1)
+        # if torch.count_nonzero(batch["heatmaps"]):
+        #     mse = (((preds["heatmaps"] - batch["heatmaps"])**2).sum()/torch.count_nonzero(batch["heatmaps"])).cpu().numpy().reshape(1)
+        # else:
+        #     mse = (((preds["heatmaps"] - batch["heatmaps"])**2).sum()).cpu().numpy().reshape(1)
+
+        mse = ((preds["heatmaps"] - batch["heatmaps"])**2).mean().cpu().numpy().reshape(1)
         tp.update({"mse": mse})  # update tp with mask IoU
         
         if self.seen < 5:

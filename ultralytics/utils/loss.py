@@ -923,6 +923,40 @@ class AdaptiveWingLoss(nn.Module):
         
         return losses.mean()
 
+def focal_loss(pred, target, alpha=2, gamma=4, reduction = 'mean'):
+    bce_loss = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
+    pt = torch.exp(-bce_loss)
+    focal_loss = alpha * (1. - pt) ** gamma * bce_loss
+    if reduction == 'mean':
+        return torch.mean(focal_loss)
+    elif reduction == 'sum':
+        return torch.sum(focal_loss)
+    else:
+        return focal_loss
+
+
+def focal_loss_continuous(pred, target, alpha=2, beta=4):
+    """
+    Treat the problem as continuous - no hard threshold.
+    Pixels are weighted by their target value.
+    """
+    # Separate positive and negative regions (but not binary)
+    pos_inds = target.ge(0.01).float()  # Any non-zero pixel
+    neg_inds = target.lt(0.01).float()
+    
+    # Positive loss: weighted by target value (higher target = more important)
+    pos_weights = torch.pow(1 - pred, alpha)
+    pos_loss = torch.log(pred + 1e-12) * pos_weights * pos_inds * target  # ← weighted by target!
+    
+    # Negative loss: standard focal term
+    neg_weights = torch.pow(1 - target, beta) * torch.pow(pred, alpha)
+    neg_loss = torch.log(1 - pred + 1e-12) * neg_weights * neg_inds
+    
+    num_pos = pos_inds.sum().clamp(min=1)
+    loss = -(pos_loss.sum() + neg_loss.sum()) / num_pos
+    
+    return loss
+
 class HeatmapLoss:
     """Criterion class for computing training losses for YOLOv8 object detection."""
 
@@ -946,7 +980,8 @@ class HeatmapLoss:
         self.bbox_loss = BboxLoss(m.reg_max).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
-        self.hm_loss = AdaptiveWingLoss()
+        # self.hm_loss = AdaptiveWingLoss()
+        self.hm_loss = nn.MSELoss()
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
         """Preprocess targets by converting to tensor format and scaling coordinates."""
@@ -976,7 +1011,7 @@ class HeatmapLoss:
 
     def cal_heatmap_loss(self, outs, gts):
         outs = outs.squeeze()
-        loss = self.hm_loss(outs, gts).mean()
+        loss = self.hm_loss(torch.sigmoid(outs), gts).mean() + focal_loss(outs, gts)
         # if torch.count_nonzero(gts):
         #     loss = self.mse(outs, gts).sum()/torch.count_nonzero(gts)
         # else:

@@ -1240,14 +1240,12 @@ class HeatmapAttention(Detect):
         #     ViTBlock(dim=c, patch_size=ps, img_size=size)  # set dim=in_channels for residual
         #     for c, ps, size in zip(ch, patch_sizes, sizes)
         # )
-
-        self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3, 2, 1), 
-                                               Conv(c4, c4, 3, 2, 1), 
-                                               AAttn(c4, 8, 1), 
-                                               AAttn(c4, 8, 1), 
-                                               nn.Upsample(scale_factor=2),
+        self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), 
                                                Conv(c4, c4, 3), 
-                                               nn.Upsample(scale_factor=2),
+                                               Conv(c4, c4, 3), 
+                                               Conv(c4, c4, 3), 
+                                               Conv(c4, c4, 3), 
+                                               Conv(c4, c4, 3), 
                                                Conv(c4, c4, 3), 
                                                nn.Conv2d(c4, 1, 1)) for x in ch)
 
@@ -1256,7 +1254,7 @@ class HeatmapAttention(Detect):
         bs = x[0].shape[0]  # batch size
         heatmaps = [self.cv4[i](x[i]) for i in range(self.nl)]
 
-        x_attentions = [_x * hm for _x, hm in zip(x, heatmaps)]
+        x_attentions = [_x * torch.nn.Sigmoid()(hm) for _x, hm in zip(x, heatmaps)]
 
         x = Detect.forward(self, x_attentions)
         if self.training:
