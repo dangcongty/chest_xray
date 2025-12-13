@@ -122,13 +122,14 @@ class BaseModel(torch.nn.Module):
         >>> model.info()  # Display model information
     """
 
-    def forward(self, x, *args, **kwargs):
+    def forward(self, x, use_ct:bool=False, *args, **kwargs):
         """Perform forward pass of the model for either training or inference.
 
         If x is a dict, calculates and returns the loss for training. Otherwise, returns predictions for inference.
 
         Args:
             x (torch.Tensor | dict): Input tensor for inference, or dict with image tensor and labels for training.
+            ct: bool contrastive 
             *args (Any): Variable length argument list.
             **kwargs (Any): Arbitrary keyword arguments.
 
@@ -136,10 +137,10 @@ class BaseModel(torch.nn.Module):
             (torch.Tensor): Loss if x is a dict (training), or network predictions (inference).
         """
         if isinstance(x, dict):  # for cases of training and validating while training.
-            return self.loss(x, *args, **kwargs)
-        return self.predict(x, *args, **kwargs)
+            return self.loss(x, use_ct, *args, **kwargs)
+        return self.predict(x, use_ct, *args, **kwargs)
 
-    def predict(self, x, profile=False, visualize=False, augment=False, embed=None):
+    def predict(self, x, use_ct=False, profile=False, visualize=False, augment=False, embed=None):
         """Perform a forward pass through the network.
 
         Args:
@@ -154,9 +155,9 @@ class BaseModel(torch.nn.Module):
         """
         if augment:
             return self._predict_augment(x)
-        return self._predict_once(x, profile, visualize, embed)
+        return self._predict_once(x, use_ct, profile, visualize, embed)
 
-    def _predict_once(self, x, profile=False, visualize=False, embed=None):
+    def _predict_once(self, x, use_ct=False, profile=False, visualize=False, embed=None):
         """Perform a forward pass through the network.
 
         Args:
@@ -171,6 +172,7 @@ class BaseModel(torch.nn.Module):
         y, dt, embeddings = [], [], []  # outputs
         embed = frozenset(embed) if embed is not None else {-1}
         max_idx = max(embed)
+        self.save.insert(0, 2)
         for m in self.model:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
@@ -184,6 +186,8 @@ class BaseModel(torch.nn.Module):
                 embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
                 if m.i == max_idx:
                     return torch.unbind(torch.cat(embeddings, 1), dim=0)
+        if use_ct:
+            return x, y
         return x
 
     def _predict_augment(self, x):
@@ -316,7 +320,7 @@ class BaseModel(torch.nn.Module):
         if verbose:
             LOGGER.info(f"Transferred {len_updated_csd}/{len(self.model.state_dict())} items from pretrained weights")
 
-    def loss(self, batch, preds=None):
+    def loss(self, batch, use_ct = False, preds=None):
         """Compute loss.
 
         Args:
@@ -327,7 +331,7 @@ class BaseModel(torch.nn.Module):
             self.criterion = self.init_criterion()
 
         if preds is None:
-            preds = self.forward(batch["img"])
+            preds = self.forward(batch["img"], use_ct)
         return self.criterion(preds, batch)
 
     def init_criterion(self):

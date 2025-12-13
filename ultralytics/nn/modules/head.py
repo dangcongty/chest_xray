@@ -1247,14 +1247,16 @@ class HeatmapAttention(Detect):
                                                Conv(c4, c4, 3), 
                                                Conv(c4, c4, 3), 
                                                Conv(c4, c4, 3), 
-                                               nn.Conv2d(c4, 1, 1)) for x in ch)
+                                               nn.Conv2d(c4, 1, 1),
+                                               nn.Sigmoid()) for x in ch)
 
 
     def forward(self, x: list[torch.Tensor]) -> tuple | list[torch.Tensor]:
         bs = x[0].shape[0]  # batch size
         heatmaps = [self.cv4[i](x[i]) for i in range(self.nl)]
 
-        x_attentions = [_x * torch.nn.Sigmoid()(hm) for _x, hm in zip(x, heatmaps)]
+        # x_attentions = [_x * hm + _x for _x, hm in zip(x, heatmaps)]
+        x_attentions = [_x * hm for _x, hm in zip(x, heatmaps)]
 
         x = Detect.forward(self, x_attentions)
         if self.training:

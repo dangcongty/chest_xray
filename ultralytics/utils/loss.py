@@ -1009,9 +1009,9 @@ class HeatmapLoss:
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
         return dist2bbox(pred_dist, anchor_points, xywh=False)
 
-    def cal_heatmap_loss(self, outs, gts):
+    def cal_heatmap_loss(self, outs, gts, use_ct = False):
         outs = outs.squeeze()
-        loss = self.hm_loss(torch.sigmoid(outs), gts).mean() + focal_loss(outs, gts)
+        loss = self.hm_loss(outs, gts).sum() # + focal_loss(outs, gts) # TODO: phải trả outs/gain 
         # if torch.count_nonzero(gts):
         #     loss = self.mse(outs, gts).sum()/torch.count_nonzero(gts)
         # else:
@@ -1020,8 +1020,14 @@ class HeatmapLoss:
     
     def __call__(self, preds: Any, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
-        loss = torch.zeros(4, device=self.device)  # box, cls, dfl, heatmap
-        feats, heatmap = preds if len(preds) == 2 else preds[1]
+        use_ct = self.hyp.contrastive
+        if use_ct:
+            loss = torch.zeros(5, device=self.device)  # box, cls, dfl, heatmap
+            feats, heatmap = preds[0]
+            saved_feats = preds[1]
+        else:
+            loss = torch.zeros(4, device=self.device)  # box, cls, dfl, heatmap
+            feats, heatmap = preds if len(preds) == 2 else preds[1]
         feats = feats[1] if isinstance(feats, tuple) else feats
         
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
@@ -1079,8 +1085,47 @@ class HeatmapLoss:
         loss[1] *= self.hyp.cls  # cls gain
         loss[2] *= self.hyp.dfl  # dfl gain
 
-        # heat loss
+        # Heatmap loss
         loss[3] = self.cal_heatmap_loss(heatmap, batch['heatmaps'])
         loss[3] *= self.hyp.hm
 
+        # Contrastive loss
+        if use_ct:
+            labels = torch.zeros(heatmap.shape[0]).to(heatmap.device)
+            labels[torch.unique(batch['batch_idx']).to(torch.int)] = 1
+
+            pos_mask = labels.unsqueeze(0) == labels.unsqueeze(1)  # [B, B]
+            neg_mask = ~pos_mask  # tất cả các cặp khác label
+
+            pos_mask.fill_diagonal_(False)  # loại bỏ self-pairs
+            temperature = 0.1
+
+            ct_losses = []
+            for s in [2, 4, 6, 10]:
+                f = saved_feats[s]
+                pool_f = torch.nn.AdaptiveAvgPool2d(output_size=5)(f).mean((2, 3))
+                norm_f = F.normalize(pool_f, dim = 1)
+                cosine_sim = (norm_f @ norm_f.t())
+                margin = 0.5
+                if pos_mask.sum() > 0:
+                    pos_loss = 1 - (cosine_sim[pos_mask]).mean()
+                else: pos_loss = torch.zeros([], device=heatmap.device)
+                if neg_mask.sum() > 0:
+                    neg_loss = torch.clamp(cosine_sim[neg_mask] - margin, min=0).mean()
+                else: neg_loss = torch.zeros([], device=heatmap.device)
+                _loss = pos_loss + 10*neg_loss
+
+                # sim = cosine_sim/temperature
+                # exp_sim = torch.exp(sim)    # [B, B]
+                # pos_exp = (exp_sim * pos_mask).sum(dim=1)  # [B]
+                # neg_exp = (exp_sim * neg_mask).sum(dim=1)  # [B]
+                # mask_valid = pos_exp > 0
+                # loss_per_sample = -torch.log(pos_exp / (pos_exp + neg_exp))
+                # loss_per_sample = loss_per_sample[mask_valid]
+                # _loss = loss_per_sample.mean()
+                ct_losses.append(_loss)
+            ct_loss = torch.stack(ct_losses).mean()
+
+            loss[4] = ct_loss * self.hyp.ct
+        
         return loss * batch_size, loss.detach()  # loss(box, cls, dfl)

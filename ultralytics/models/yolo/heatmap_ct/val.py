@@ -116,17 +116,16 @@ class HeatmapValidator(DetectionValidator):
         #     mse = (((preds["heatmaps"] - batch["heatmaps"])**2).sum()/torch.count_nonzero(batch["heatmaps"])).cpu().numpy().reshape(1)
         # else:
         #     mse = (((preds["heatmaps"] - batch["heatmaps"])**2).sum()).cpu().numpy().reshape(1)
-        try:
-            mse = ((preds["heatmaps"] - batch["heatmaps"])**2).mean().cpu().numpy().reshape(1)
-            tp.update({"mse": mse})  # update tp with mask IoU
-            
-            if self.seen < 5:
-                b = (batch["heatmaps"][-(21*21+42*42):-21*21].reshape((42, 42)).cpu().numpy())*1000
-                a = (preds["heatmaps"][0][-(21*21+42*42):-21*21].reshape((42, 42)).cpu().numpy())*1000
-                os.makedirs(f'runs/heatmap/{self.args.name}/vis_heat/', exist_ok=True)
-                cv2.imwrite(f'runs/heatmap/{self.args.name}/vis_heat/{self.seen}.jpg', np.hstack([a, b]))
-        except RuntimeError as e:
-            tp.update({'mse': np.array([])})
+
+        mse = ((preds["heatmaps"] - batch["heatmaps"])**2).mean().cpu().numpy().reshape(1)
+        tp.update({"mse": mse})  # update tp with mask IoU
+        
+        if self.seen < 5:
+            b = (batch["heatmaps"][-(21*21+42*42):-21*21].reshape((42, 42)).cpu().numpy())*1000
+            a = (preds["heatmaps"][0][-(21*21+42*42):-21*21].reshape((42, 42)).cpu().numpy())*1000
+            os.makedirs(f'runs/heatmap/{self.args.name}/vis_heat/', exist_ok=True)
+            cv2.imwrite(f'runs/heatmap/{self.args.name}/vis_heat/{self.seen}.jpg', np.hstack([a, b]))
+        
         return tp
 
     def plot_predictions(self, batch: dict[str, Any], preds: list[dict[str, torch.Tensor]], ni: int) -> None:

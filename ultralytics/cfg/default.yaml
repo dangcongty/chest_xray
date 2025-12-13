@@ -134,3 +134,7 @@ tracker: botsort.yaml # (str) tracker config file: botsort.yaml or bytetrack.yam
 # Heatmap
 hm: 1 # (float) heatmap loss gain
 hm_scales: [8, 16, 32]
+
+# Contrastive Learning
+contrastive: False
+ct: 1
