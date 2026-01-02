@@ -387,6 +387,13 @@ class BaseTrainer:
             self.plot_idx.extend([base_idx, base_idx + 1, base_idx + 2])
         epoch = self.start_epoch
         self.optimizer.zero_grad()  # zero any resumed gradients to ensure stability on train start
+
+        # Tensorboard
+        from torch.utils.tensorboard import SummaryWriter
+        writer = SummaryWriter(self.save_dir)
+        self.trackings = []
+
+        # Training
         while True:
             self.epoch = epoch
             self.run_callbacks("on_train_epoch_start")
@@ -435,6 +442,7 @@ class BaseTrainer:
                     if RANK != -1:
                         self.loss *= self.world_size
                     self.tloss = self.loss_items if self.tloss is None else (self.tloss * i + self.loss_items) / (i + 1)
+                    self.trackings.append(self.loss_items.cpu().numpy())
 
                 # Backward
                 self.scaler.scale(self.loss).backward()
@@ -471,6 +479,13 @@ class BaseTrainer:
 
                 self.run_callbacks("on_train_batch_end")
 
+            # TSB log
+            self.trackings = np.concatenate([self.trackings]).mean(0)
+            for loss_id, name in enumerate(['box', 'cls', 'dfl', 'hm', 'ct', 'ct_cls']):
+                writer.add_scalar(f'Train/{name}', self.trackings[loss_id], epoch)
+            self.trackings = []
+
+            # yolo process
             self.lr = {f"lr/pg{ir}": x["lr"] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
 
             self.run_callbacks("on_train_epoch_end")
@@ -482,6 +497,8 @@ class BaseTrainer:
             if self.args.val or final_epoch or self.stopper.possible_stop or self.stop:
                 self._clear_memory(threshold=0.5)  # prevent VRAM spike
                 self.metrics, self.fitness = self.validate()
+                for mt in self.metrics:
+                    writer.add_scalar(f'{mt}', self.metrics[mt], epoch)
 
             # NaN recovery
             if self._handle_nan_recovery(epoch):

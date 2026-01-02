@@ -243,7 +243,7 @@ def verify_image_label(args: tuple) -> list:
                 keypoints = np.concatenate([keypoints, kpt_mask[..., None]], axis=-1)  # (nl, nkpt, 3)
 
         if heatmap:
-            heatmap = np.load(hm_file)
+            heatmap = np.load(hm_file).astype(np.float16)
             
         lb = lb[:, :5]
         return im_file, lb, shape, segments, keypoints, heatmap, nm, nf, ne, nc, msg

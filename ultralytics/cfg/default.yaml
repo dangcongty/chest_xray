@@ -138,3 +138,4 @@ hm_scales: [8, 16, 32]
 # Contrastive Learning
 contrastive: False
 ct: 1
+ct_cls: 1

@@ -32,7 +32,7 @@ from .block import (
     SwiGLUFFN,
     ViTBlock,
 )
-from .conv import Conv, DWConv
+from .conv import CBAM, Conv, DWConv, GhostConv, RepConv
 from .transformer import (
     MLP,
     DeformableTransformerDecoder,
@@ -110,11 +110,45 @@ class Detect(nn.Module):
         self.no = nc + self.reg_max * 4  # number of outputs per anchor
         self.stride = torch.zeros(self.nl)  # strides computed during build
         c2, c3 = max((16, ch[0] // 4, self.reg_max * 4)), max(ch[0], min(self.nc, 100))  # channels
+        # self.cv2 = nn.ModuleList(
+        #     nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch
+        # )
+        # self.cv3 = (
+        #     nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
+        #     if self.legacy
+        #     else nn.ModuleList(
+        #         nn.Sequential(
+        #             nn.Sequential(DWConv(x, x, 3), Conv(x, c3, 1)),
+        #             nn.Sequential(DWConv(c3, c3, 3), Conv(c3, c3, 1)),
+        #             nn.Conv2d(c3, self.nc, 1),
+        #         )
+        #         for x in ch
+        #     )
+        # )        
         self.cv2 = nn.ModuleList(
-            nn.Sequential(Conv(x, c2, 3), Conv(c2, c2, 3), nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch
+            nn.Sequential(GhostConv(x, c2, 1), 
+                          CBAM(c2),
+                          RepConv(c2, c2, 3),
+                          CBAM(c2),
+                          GhostConv(c2, c2, 1), 
+                          CBAM(c2),
+                          RepConv(c2, c2, 3), 
+                          CBAM(c2),
+                          GhostConv(c2, c2, 1), 
+                          CBAM(c2),
+                          nn.Conv2d(c2, 4 * self.reg_max, 1)) for x in ch
         )
         self.cv3 = (
-            nn.ModuleList(nn.Sequential(Conv(x, c3, 3), Conv(c3, c3, 3), nn.Conv2d(c3, self.nc, 1)) for x in ch)
+            nn.ModuleList(nn.Sequential(GhostConv(x, c3, 1), 
+                                        CBAM(c3),
+                                        RepConv(c3, c3, 3), 
+                                        CBAM(c3),
+                                        GhostConv(c3, c3, 1), 
+                                        CBAM(c3),
+                                        RepConv(c3, c3, 3), 
+                                        CBAM(c3),
+                                        GhostConv(c3, c3, 1), 
+                                        nn.Conv2d(c3, self.nc, 1)) for x in ch)
             if self.legacy
             else nn.ModuleList(
                 nn.Sequential(
@@ -1233,13 +1267,6 @@ class HeatmapAttention(Detect):
         super().__init__(nc, ch)
 
         c4 = ch[0] // 4
-        # self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), Conv(c4, c4, 3), nn.Conv2d(c4, 1, 1)) for x in ch)
-        # sizes = (80, 40, 20)
-        # patch_sizes = [8, 4, 2]
-        # self.cv4 = nn.ModuleList(
-        #     ViTBlock(dim=c, patch_size=ps, img_size=size)  # set dim=in_channels for residual
-        #     for c, ps, size in zip(ch, patch_sizes, sizes)
-        # )
         self.cv4 = nn.ModuleList(nn.Sequential(Conv(x, c4, 3), 
                                                Conv(c4, c4, 3), 
                                                Conv(c4, c4, 3), 
@@ -1255,8 +1282,8 @@ class HeatmapAttention(Detect):
         bs = x[0].shape[0]  # batch size
         heatmaps = [self.cv4[i](x[i]) for i in range(self.nl)]
 
-        # x_attentions = [_x * hm + _x for _x, hm in zip(x, heatmaps)]
-        x_attentions = [_x * hm for _x, hm in zip(x, heatmaps)]
+        x_attentions = [_x * hm + _x for _x, hm in zip(x, heatmaps)]
+        # x_attentions = [_x * hm for _x, hm in zip(x, heatmaps)]
 
         x = Detect.forward(self, x_attentions)
         if self.training:

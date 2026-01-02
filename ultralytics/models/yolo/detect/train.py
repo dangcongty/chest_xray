@@ -102,6 +102,7 @@ class DetectionTrainer(BaseTrainer):
             shuffle=shuffle,
             rank=rank,
             drop_last=self.args.compile and mode == "train",
+            mode = mode
         )
 
     def preprocess_batch(self, batch: dict) -> dict:

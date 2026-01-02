@@ -76,6 +76,7 @@ from .conv import (
     LightConv,
     RepConv,
     SpatialAttention,
+    LocalRegionTransformConv
 )
 from .head import (
     OBB,
@@ -182,4 +183,5 @@ __all__ = (
     "YOLOEDetect",
     "YOLOESegment",
     "v10Detect",
+    "LocalRegionTransformConv"
 )

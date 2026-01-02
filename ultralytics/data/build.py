@@ -17,7 +17,11 @@ from PIL import Image
 from torch.utils.data import Dataset, dataloader, distributed
 
 from ultralytics.cfg import IterableSimpleNamespace
-from ultralytics.data.dataset import GroundingDataset, YOLODataset, YOLOMultiModalDataset
+from ultralytics.data.dataset import (
+    GroundingDataset,
+    YOLODataset,
+    YOLOMultiModalDataset,
+)
 from ultralytics.data.loaders import (
     LOADERS,
     LoadImagesAndVideos,
@@ -35,7 +39,7 @@ from ultralytics.utils.torch_utils import TORCH_2_0
 
 
 class InfiniteDataLoader(dataloader.DataLoader):
-    """Dataloader that reuses workers for infinite iteration.
+    """DataLoader that reuses workers for infinite iteration.
 
     This dataloader extends the PyTorch DataLoader to provide infinite recycling of workers, which improves efficiency
     for training loops that need to iterate through the dataset multiple times without recreating workers.
@@ -51,7 +55,7 @@ class InfiniteDataLoader(dataloader.DataLoader):
         reset: Reset the iterator, useful when modifying dataset settings during training.
 
     Examples:
-        Create an infinite dataloader for training
+        Create an infinite DataLoader for training
         >>> dataset = YOLODataset(...)
         >>> dataloader = InfiniteDataLoader(dataset, batch_size=16, shuffle=True)
         >>> for batch in dataloader:  # Infinite iteration
@@ -76,7 +80,7 @@ class InfiniteDataLoader(dataloader.DataLoader):
             yield next(self.iterator)
 
     def __del__(self):
-        """Ensure that workers are properly terminated when the dataloader is deleted."""
+        """Ensure that workers are properly terminated when the DataLoader is deleted."""
         try:
             if not hasattr(self.iterator, "_workers"):
                 return
@@ -110,6 +114,94 @@ class _RepeatSampler:
         """Iterate over the sampler indefinitely, yielding its contents."""
         while True:
             yield from iter(self.sampler)
+
+
+class BalancedContiguousDistributedSampler(torch.utils.data.Sampler):
+    """
+    Distributed sampler that balances 50% object images and 50% background images
+    while assigning contiguous chunks per rank (GPU).
+
+    Compatible with Ultralytics YOLO datasets.
+    """
+
+    def __init__(
+        self,
+        dataset: Dataset,
+        num_replicas: int | None = None,
+        rank: int | None = None,
+        shuffle: bool = True,
+    ) -> None:
+        if num_replicas is None:
+            num_replicas = dist.get_world_size() if dist.is_initialized() else 1
+        if rank is None:
+            rank = dist.get_rank() if dist.is_initialized() else 0
+
+        self.dataset = dataset
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.shuffle = shuffle
+        self.epoch = 0
+
+        # 🔑 YOLO labels: len(label) > 0 => object
+        from tqdm import tqdm
+        self.obj_indices = []
+        self.bg_indices = []
+        for i, lb in enumerate(tqdm(dataset.labels)):
+            if (0 in lb['cls'] or 3 in lb['cls']) and len(lb['cls']) == 1:
+                self.bg_indices.append(i)
+                continue
+            if len(lb['cls']) > 0:
+                self.obj_indices.append(i)
+            else:
+                self.bg_indices.append(i)
+
+        assert self.obj_indices, "No object images found"
+        assert self.bg_indices, "No background images found"
+
+        # Make both lists same length for perfect alternation
+        max_len = max(len(self.obj_indices), len(self.bg_indices))
+        self.obj_indices = self._repeat_to_length(self.obj_indices, max_len)
+        self.bg_indices  = self._repeat_to_length(self.bg_indices, max_len)
+
+        self.total_size = 2 * max_len  # obj + bg interleaved
+
+    @staticmethod
+    def _repeat_to_length(indices: list[int], length: int) -> list[int]:
+        """Repeat indices list to reach target length."""
+        reps = math.ceil(length / len(indices))
+        return (indices * reps)[:length]
+
+    def _get_rank_range(self, total_len: int) -> tuple[int, int]:
+        """Contiguous split like ContiguousDistributedSampler."""
+        per_rank = total_len // self.num_replicas
+        remainder = total_len % self.num_replicas
+
+        start = self.rank * per_rank + min(self.rank, remainder)
+        end = start + per_rank + (1 if self.rank < remainder else 0)
+        return start, end
+
+    def __iter__(self) -> Iterator[int]:
+        # Interleave obj / bg → [obj0, bg0, obj1, bg1, ...]
+        indices = []
+        for o, b in zip(self.obj_indices, self.bg_indices):
+            indices.append(o)
+            indices.append(b)
+
+        if self.shuffle:
+            g = torch.Generator()
+            g.manual_seed(self.epoch)
+            perm = torch.randperm(len(indices), generator=g).tolist()
+            indices = [indices[i] for i in perm]
+
+        start, end = self._get_rank_range(len(indices))
+        return iter(indices[start:end])
+
+    def __len__(self) -> int:
+        start, end = self._get_rank_range(self.total_size)
+        return end - start
+
+    def set_epoch(self, epoch: int) -> None:
+        self.epoch = epoch
 
 
 class ContiguousDistributedSampler(torch.utils.data.Sampler):
@@ -161,11 +253,12 @@ class ContiguousDistributedSampler(torch.utils.data.Sampler):
             batch_size = getattr(dataset, "batch_size", 1)
 
         self.num_replicas = num_replicas
-        self.batch_size = batch_size
         self.rank = rank
         self.epoch = 0
         self.shuffle = shuffle
         self.total_size = len(dataset)
+        # ensure all ranks have a sample if batch size >= total size; degenerates to round-robin sampler
+        self.batch_size = 1 if batch_size >= self.total_size else batch_size
         self.num_batches = math.ceil(self.total_size / self.batch_size)
 
     def _get_rank_indices(self) -> tuple[int, int]:
@@ -290,6 +383,7 @@ def build_dataloader(
     rank: int = -1,
     drop_last: bool = False,
     pin_memory: bool = True,
+    mode = 'val'
 ) -> InfiniteDataLoader:
     """Create and return an InfiniteDataLoader or DataLoader for training or validation.
 
@@ -320,6 +414,8 @@ def build_dataloader(
         if shuffle
         else ContiguousDistributedSampler(dataset)
     )
+    if mode == 'train':
+        sampler = BalancedContiguousDistributedSampler(dataset, shuffle=shuffle)
     generator = torch.Generator()
     generator.manual_seed(6148914691236517205 + RANK)
     return InfiniteDataLoader(
@@ -416,7 +512,7 @@ def load_inference_source(
     source, stream, screenshot, from_img, in_memory, tensor = check_source(source)
     source_type = source.source_type if in_memory else SourceTypes(stream, screenshot, from_img, tensor)
 
-    # Dataloader
+    # DataLoader
     if tensor:
         dataset = LoadTensor(source)
     elif in_memory:

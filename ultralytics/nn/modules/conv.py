@@ -8,6 +8,8 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torchvision import transforms
 
 __all__ = (
     "CBAM",
@@ -24,6 +26,7 @@ __all__ = (
     "LightConv",
     "RepConv",
     "SpatialAttention",
+    "LocalRegionTransformConv"
 )
 
 
@@ -87,6 +90,164 @@ class Conv(nn.Module):
             (torch.Tensor): Output tensor.
         """
         return self.act(self.conv(x))
+
+
+class LocalRegionTransformConv(nn.Module):
+    """
+    CLAHE-like learnable local photometric transform
+    - Per-tile parameter prediction
+    - Smooth spatial interpolation of parameters
+    - Safe parameterization
+    """
+    default_act = nn.SiLU()  # default activation
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
+        super().__init__()
+        self.tile_size = 32
+        self.num_channels = c1
+
+        # Predictor outputs per-tile params: brightness, contrast, saturation
+        self.param_predictor = nn.Sequential(
+            nn.Conv2d(c1, c2, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c2, c2, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(c2, 3, 1)
+        )
+
+        # Global base parameters
+        self.global_brightness = nn.Parameter(torch.tensor(0.0))
+        self.global_contrast   = nn.Parameter(torch.tensor(1.0))
+        self.global_saturation = nn.Parameter(torch.tensor(1.0))
+
+        # normal conv
+        self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, bias=False)
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+
+        self.to_pil = transforms.ToPILImage()
+
+    @staticmethod
+    def local_mean_blur(x, k):
+        """
+        Blur giữ nguyên HxW cho kernel CHẴN / LẺ
+        """
+        B, C, H, W = x.shape
+
+        pad_l = k // 2 - 1
+        pad_r = k // 2
+        pad_t = k // 2 - 1
+        pad_b = k // 2
+
+        x = F.pad(x, (pad_l, pad_r, pad_t, pad_b), mode="reflect")
+
+        weight = torch.ones(C, 1, k, k, device=x.device, dtype=x.dtype)
+        weight = weight / (k * k)
+
+        return F.conv2d(x, weight, groups=C)
+        
+    def forward(self, x):
+        """
+        x: [B, C, H, W] in range [0, 1]
+        """
+        B, C, H, W = x.shape
+        ts = self.tile_size
+
+        # --------------------------------------------------
+        # 1. Pad để chia hết tile
+        # --------------------------------------------------
+        pad_h = (ts - H % ts) % ts
+        pad_w = (ts - W % ts) % ts
+        if pad_h > 0 or pad_w > 0:
+            x = F.pad(x, (0, pad_w, 0, pad_h), mode="reflect")
+
+        _, _, Hp, Wp = x.shape
+        nh, nw = Hp // ts, Wp // ts
+
+        # --------------------------------------------------
+        # 2. Predict params
+        # --------------------------------------------------
+        params = self.param_predictor(x)          # [B, 3, Hp, Wp]
+        params = params.view(B, 3, nh, ts, nw, ts)
+        params = params.mean(dim=(3, 5))           # [B, 3, nh, nw]
+
+        # --------------------------------------------------
+        # 3. Safe parameterization (GIỚI HẠN)
+        # --------------------------------------------------
+        MAX_B = 0.05
+        MAX_C = 0.12
+        MAX_S = 0.12
+
+        b = MAX_B * torch.tanh(params[:, 0:1]) + self.global_brightness
+        c = 1.0 + MAX_C * torch.tanh(params[:, 1:2]) + (self.global_contrast - 1.0)
+        s = 1.0 + MAX_S * torch.tanh(params[:, 2:3]) + (self.global_saturation - 1.0)
+
+        params = torch.cat([b, c, s], dim=1)
+
+        # --------------------------------------------------
+        # 4. Interpolate CLAHE-style
+        # --------------------------------------------------
+        params = F.interpolate(
+            params,
+            size=(Hp, Wp),
+            mode="bilinear",
+            align_corners=False
+        )
+
+        brightness = params[:, 0:1]
+        contrast   = params[:, 1:2]
+        saturation = params[:, 2:3]
+
+        # --------------------------------------------------
+        # 5. Clamp cứng (FAIL-SAFE)
+        # --------------------------------------------------
+        brightness = torch.clamp(brightness, -0.08, 0.08)
+        contrast   = torch.clamp(contrast,   0.88, 1.12)
+        saturation = torch.clamp(saturation, 0.88, 1.12)
+
+        # --------------------------------------------------
+        # 6. Attenuate vùng sáng (chống over-CLAHE)
+        # --------------------------------------------------
+        luma = x.mean(dim=1, keepdim=True)
+        atten = 1.0 - torch.clamp((luma - 0.6) / 0.4, 0.0, 1.0)
+
+        brightness = brightness * atten
+        contrast   = 1.0 + (contrast - 1.0) * atten
+
+        # --------------------------------------------------
+        # 7. Local contrast (KHÔNG LỆCH SHAPE)
+        # --------------------------------------------------
+        local_mean = self.local_mean_blur(x, ts)
+        x = (x - local_mean) * contrast + local_mean
+
+        # --------------------------------------------------
+        # 8. Brightness
+        # --------------------------------------------------
+        x = x + brightness
+
+        # --------------------------------------------------
+        # 9. Saturation (RGB)
+        # --------------------------------------------------
+        if C == 3:
+            gray = (
+                0.299 * x[:, 0:1] +
+                0.587 * x[:, 1:2] +
+                0.114 * x[:, 2:3]
+            )
+            x = gray + saturation * (x - gray)
+
+        x = torch.clamp(x, 0.0, 1.0)
+
+        # --------------------------------------------------
+        # 10. Remove padding
+        # --------------------------------------------------
+        if pad_h > 0 or pad_w > 0:
+            x = x[:, :, :H, :W]
+        img = self.to_pil(x[0]) 
+        img.save('clahe_module/a.jpg')
+        return self.act(self.bn(self.conv(x)))
+
+
+
 
 
 class Conv2(Conv):
@@ -666,4 +827,6 @@ class Index(nn.Module):
         Returns:
             (torch.Tensor): Selected tensor.
         """
+        return x[self.index]
+        return x[self.index]
         return x[self.index]

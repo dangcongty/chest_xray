@@ -55,6 +55,7 @@ from ultralytics.nn.modules import (
     HGStem,
     ImagePoolingAttn,
     Index,
+    LocalRegionTransformConv,
     LRPCHead,
     Pose,
     RepC3,
@@ -332,7 +333,15 @@ class BaseModel(torch.nn.Module):
 
         if preds is None:
             preds = self.forward(batch["img"], use_ct)
-        return self.criterion(preds, batch)
+        if use_ct:
+            saved_feats = preds[1]
+            ct_classify = []
+            for s in [4, 6, 10]:
+                f = saved_feats[s]
+                ct_cls = self.ct_heads(f)
+                ct_classify.append(ct_cls)
+
+        return self.criterion(preds, batch, ct_classify)
 
     def init_criterion(self):
         """Initialize the loss criterion for the BaseModel."""
@@ -421,6 +430,18 @@ class DetectionModel(BaseModel):
         if verbose:
             self.info()
             LOGGER.info("")
+
+        self.ct_heads = nn.Sequential(
+            nn.AdaptiveAvgPool2d((20, 20)),
+            nn.Conv2d(512, 128, 1, 1),
+            nn.BatchNorm2d(128),
+            nn.SiLU(),
+            nn.Flatten(1),
+            nn.Linear(128*20*20, 128),
+            nn.BatchNorm1d(128),
+            nn.SiLU(),
+            nn.Linear(128, 1),
+        )
 
     def _predict_augment(self, x):
         """Perform augmentations on input image x and return augmented inference and train outputs.
@@ -1568,6 +1589,7 @@ def parse_model(d, ch, verbose=True):
             SCDown,
             C2fCIB,
             A2C2f,
+            LocalRegionTransformConv
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments

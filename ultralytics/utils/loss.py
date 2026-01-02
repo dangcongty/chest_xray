@@ -981,7 +981,7 @@ class HeatmapLoss:
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
         # self.hm_loss = AdaptiveWingLoss()
-        self.hm_loss = nn.MSELoss()
+        self.hm_loss = nn.MSELoss(reduction='none')
 
     def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
         """Preprocess targets by converting to tensor format and scaling coordinates."""
@@ -1018,11 +1018,11 @@ class HeatmapLoss:
         #     loss = self.mse(outs, gts).sum()
         return loss
     
-    def __call__(self, preds: Any, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+    def __call__(self, preds: Any, batch: dict[str, torch.Tensor], ct_classify = []) -> tuple[torch.Tensor, torch.Tensor]:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
         use_ct = self.hyp.contrastive
         if use_ct:
-            loss = torch.zeros(5, device=self.device)  # box, cls, dfl, heatmap
+            loss = torch.zeros(6, device=self.device)  # box, cls, dfl, heatmap
             feats, heatmap = preds[0]
             saved_feats = preds[1]
         else:
@@ -1099,33 +1099,75 @@ class HeatmapLoss:
 
             pos_mask.fill_diagonal_(False)  # loại bỏ self-pairs
             temperature = 0.1
-
             ct_losses = []
-            for s in [2, 4, 6, 10]:
-                f = saved_feats[s]
-                pool_f = torch.nn.AdaptiveAvgPool2d(output_size=5)(f).mean((2, 3))
-                norm_f = F.normalize(pool_f, dim = 1)
-                cosine_sim = (norm_f @ norm_f.t())
-                margin = 0.5
-                if pos_mask.sum() > 0:
-                    pos_loss = 1 - (cosine_sim[pos_mask]).mean()
-                else: pos_loss = torch.zeros([], device=heatmap.device)
-                if neg_mask.sum() > 0:
-                    neg_loss = torch.clamp(cosine_sim[neg_mask] - margin, min=0).mean()
-                else: neg_loss = torch.zeros([], device=heatmap.device)
-                _loss = pos_loss + 10*neg_loss
+            margin = 0.5
+            cls_ct_losses = []
+            ct_classify_loss_func = nn.BCEWithLogitsLoss()
+            mode = 'ct_cls'
+            if mode == 'ct_cls':
+                for idx, s in enumerate([4, 6, 10]):
+                    cls_ct_losses.append(ct_classify_loss_func(ct_classify[idx].squeeze(), labels))
+                    f = saved_feats[s]                 # [B, C, H, W]
+                    # 1. Region pooling
+                    pool_f = F.adaptive_avg_pool2d(f, (20, 20))   # [B, C, 20, 20]
+                    # 2. Flatten region
+                    pool_f = pool_f.flatten(1)         # [B, C*20*20]
+                    # 3. Normalize
+                    norm_f = F.normalize(pool_f, dim=1)
+                    # 4. Cosine similarity between samples
+                    cosine_sim = norm_f @ norm_f.T     # [B, B]
+                    margin = 0.5
+                    # 5. Positive loss
+                    if pos_mask.sum() > 0:
+                        pos_loss = 1.0 - cosine_sim[pos_mask].mean()
+                    else:
+                        pos_loss = torch.zeros([], device=cosine_sim.device)
+                    # 6. Negative loss (hinge)
+                    if neg_mask.sum() > 0:
+                        neg_loss = torch.clamp(cosine_sim[neg_mask] - margin, min=0).mean()
+                    else:                        
+                        neg_loss = torch.zeros([], device=cosine_sim.device)
+                    _loss = pos_loss + 10.0 * neg_loss
+                    ct_losses.append(_loss)
 
-                # sim = cosine_sim/temperature
-                # exp_sim = torch.exp(sim)    # [B, B]
-                # pos_exp = (exp_sim * pos_mask).sum(dim=1)  # [B]
-                # neg_exp = (exp_sim * neg_mask).sum(dim=1)  # [B]
-                # mask_valid = pos_exp > 0
-                # loss_per_sample = -torch.log(pos_exp / (pos_exp + neg_exp))
-                # loss_per_sample = loss_per_sample[mask_valid]
-                # _loss = loss_per_sample.mean()
-                ct_losses.append(_loss)
-            ct_loss = torch.stack(ct_losses).mean()
+            elif mode == 'triplet_cls':
+                for idx, s in enumerate([4, 6, 10]):
+                    cls_ct_losses.append(ct_classify_loss_func(ct_classify[idx].squeeze(), labels))
+                    f = saved_feats[s]  # [B, C, H, W]
+                    # 1. Region pooling
+                    pool_f = F.adaptive_avg_pool2d(f, (20, 20))  # [B, C, 20, 20]
+                    # 2. Flatten
+                    pool_f = pool_f.flatten(1)  # [B, C*20*20]
+                    # 3. Normalize
+                    norm_f = F.normalize(pool_f, dim=1)
+                    # 4. Cosine similarity matrix
+                    cosine_sim = norm_f @ norm_f.T  # [B, B]
+                    triplet_losses = []
+                    # 5. Build triplets
+                    for i in range(cosine_sim.size(0)):
+                        pos_idx = pos_mask[i]          # positives for anchor i
+                        neg_idx = neg_mask[i]          # negatives for anchor i
+                        if pos_idx.sum() == 0 or neg_idx.sum() == 0:
+                            continue
+                        pos_sim = cosine_sim[i][pos_idx]  # [P]
+                        neg_sim = cosine_sim[i][neg_idx]  # [N]
+                        # 6. Hard mining (recommended)
+                        hardest_pos = pos_sim.min()       # lowest similarity
+                        hardest_neg = neg_sim.max()       # highest similarity
+                        ctloss = torch.clamp(
+                            hardest_neg - hardest_pos + margin,
+                            min=0.0
+                        )
+                        triplet_losses.append(ctloss)
+                    if len(triplet_losses) > 0:
+                        ct_losses.append(torch.stack(triplet_losses).mean())
+                    else:
+                        ct_losses.append(torch.zeros([], device=f.device))
+
+            ct_loss = torch.stack(ct_losses).sum()
+            cls_ct_losses = torch.stack(cls_ct_losses).sum()
 
             loss[4] = ct_loss * self.hyp.ct
-        
+            loss[5] = cls_ct_losses * self.hyp.ct_cls
+
         return loss * batch_size, loss.detach()  # loss(box, cls, dfl)

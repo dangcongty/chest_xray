@@ -2249,10 +2249,10 @@ class Format:
         if len(self.hm_scales):
             _heatmaps = []
             for scale in self.hm_scales:
-                _heatmaps.append(zoom(heatmaps, (1/scale, 1/scale), order=3).reshape((1, -1)))
+                _heatmaps.append(zoom(heatmaps.astype(np.float32), (1/scale, 1/scale), order=3).reshape((1, -1)))
             heatmaps = np.concatenate(_heatmaps, 1)
         
-        heatmaps = np.ascontiguousarray(heatmaps)
+        heatmaps = np.ascontiguousarray(heatmaps).astype(np.float16)
         heatmaps = torch.from_numpy(heatmaps)
         return heatmaps
     
