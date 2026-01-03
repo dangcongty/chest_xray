@@ -11,6 +11,8 @@
 ## Các nhiệm vụ cần làm 
 * train lại baseline với data của a Nhân
 
+## Dữ liệu:
+https://drive.google.com/file/d/1tTpiwLWyGwG_uRJeMfhcYTUvUJfqOSQH/view?usp=sharing
 
 
 # UPDATE NOTES
