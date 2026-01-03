@@ -32,7 +32,8 @@
 * Sigma heatmap change from 0.3 -> 0.2
 * Update valiation MSE
 
-
+## Ý tưởng chính
+* Enhance vùng đặc trưng sử dụng heatmap và contrastive learning 
 
 ## Các file sửa
 * Loader 50% là ảnh có background và 50% ko có background => hàm BalancedContiguousDistributedSampler ở dòng 119 trong file ultralytics/data/build.py
