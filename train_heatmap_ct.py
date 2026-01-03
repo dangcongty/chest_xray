@@ -6,6 +6,7 @@ from ultralytics import YOLO
 # model_path = '/media/ssd220/ty/xray/runs/heatmap/heatmap_ct_ctcls4/weights/best.pt'
 model_path = 'ultralytics/cfg/models/11/yolo11m_enhance-hm.yaml'
 model = YOLO(model_path)
+
 project_name = str(uuid4()) + '_contrastive'
 with open('training_name.txt', 'a') as f:
     f.write(project_name + '\n')
