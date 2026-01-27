@@ -66,7 +66,7 @@ class YOLODatasetSplitter:
         
         # Tìm tất cả ảnh
         image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
-        limit_bg = 3000
+        limit_bg = -1
         num_bg = 0
         num_obj = 0
         for img_path in images_dir.iterdir():
@@ -263,13 +263,13 @@ class YOLODatasetSplitter:
                             train_class_count, val_class_count)
         
 
-        with open('datasets/process/train_3k_bg.txt', 'w') as f:
+        with open('datasets/test/train_0k_bg.txt', 'w') as f:
             for name in train_imgs:
-                path = f'datasets/process/images/{name}'
+                path = f'datasets/test/images/{name}'
                 f.write(f'{path}\n')
-        with open('datasets/process/val_3k_bg.txt', 'w') as f:
+        with open('datasets/test/val_0k_bg.txt', 'w') as f:
             for name in val_imgs:
-                path = f'datasets/process/images/{name}'
+                path = f'datasets/test/images/{name}'
                 f.write(f'{path}\n')
 
         print(f"\n🎉 Hoàn tất!")
@@ -282,16 +282,9 @@ if __name__ == "__main__":
     # Cách 1: Chỉ tạo file lists (không copy files)
     splitter = YOLODatasetSplitter(val_ratio=0.2, random_seed=42)
     train_imgs, val_imgs = splitter.split_and_organize(
-        images_dir='datasets/process/images',
-        labels_dir='datasets/process/labels',
+        images_dir='datasets/test/images',
+        labels_dir='datasets/test/labels',
         output_dir='dataset_split',
         copy_files=False  # Chỉ tạo train.txt và val.txt
     )
     
-    # Cách 2: Copy files và tổ chức theo cấu trúc YOLO
-    # train_imgs, val_imgs = splitter.split_and_organize(
-    #     images_dir='path/to/images',
-    #     labels_dir='path/to/labels',
-    #     output_dir='dataset_split',
-    #     copy_files=True  # Copy files vào thư mục train/val
-    # )

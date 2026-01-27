@@ -1,5 +1,33 @@
-**[update 25/09/2025]**
-* Baseline: Global/Local Contrastive Loss
+# UPDATE NOTES
 
-**[update 01/10/2025]**
-* Add process data function
+## [Update 08/11/2025]
+* Add Heatmap branch
+* Add option 'heatmap' to dataset/dataloader/augmentation
+* Add loss MSE for heatmap 
+* Add Heatmap validation
+
+## [Update 09/11/2025]
+* Add visualize heatmap
+* Handle inf heatmap loss/mse
+
+## [Update 10/11/2025]
+* Transfer YOLO weight to Heatmap
+* Adjusting loss Heatmap to 'mean'
+* Fix metrics Heatmap 
+* Fix prediction Heatmap 
+* Add HeatmapAttention
+
+## [Update 12/11/2025]
+* Change Attention layer to Transformer/ViT
+* Add AdaptiveWing Loss
+
+
+## [Update 13/11/2025]
+* Add more layer to heatmap
+
+## [Update 14/11/2025]
+* Add sigmoid Heatmap
+* Add focal loss
+* Heatmap loss = mse + focal
+* Sigma heatmap change from 0.3 -> 0.2
+* Update valiation MSE

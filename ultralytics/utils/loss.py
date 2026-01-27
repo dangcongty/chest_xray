@@ -24,8 +24,7 @@ from .tal import bbox2dist
 
 
 class VarifocalLoss(nn.Module):
-    """
-    Varifocal loss by Zhang et al.
+    """Varifocal loss by Zhang et al.
 
     Implements the Varifocal Loss function for addressing class imbalance in object detection by focusing on
     hard-to-classify examples and balancing positive/negative samples.
@@ -57,11 +56,10 @@ class VarifocalLoss(nn.Module):
 
 
 class FocalLoss(nn.Module):
-    """
-    Wraps focal loss around existing loss_fcn(), i.e. criteria = FocalLoss(nn.BCEWithLogitsLoss(), gamma=1.5).
+    """Wraps focal loss around existing loss_fcn(), i.e. criteria = FocalLoss(nn.BCEWithLogitsLoss(), gamma=1.5).
 
-    Implements the Focal Loss function for addressing class imbalance by down-weighting easy examples and focusing
-    on hard negatives during training.
+    Implements the Focal Loss function for addressing class imbalance by down-weighting easy examples and focusing on
+    hard negatives during training.
 
     Attributes:
         gamma (float): The focusing parameter that controls how much the loss focuses on hard-to-classify examples.
@@ -198,60 +196,6 @@ class KeypointLoss(nn.Module):
         e = d / ((2 * self.sigmas).pow(2) * (area + 1e-9) * 2)  # from cocoeval
         return (kpt_loss_factor.view(-1, 1) * ((1 - torch.exp(-e)) * kpt_mask)).mean()
 
-class FocalLoss(nn.Module):
-    """Focal Loss wrapper for BCEWithLogitsLoss."""
-    def __init__(self, alpha=0.25, gamma=2.0, reduction='none'):
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, pred, target):
-        pred_sigmoid = torch.sigmoid(pred)
-        pt = pred_sigmoid * target + (1 - pred_sigmoid) * (1 - target)  # p_t
-        focal_weight = (self.alpha * target + (1 - self.alpha) * (1 - target)) * (1 - pt).pow(self.gamma)
-        bce_loss = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
-        loss = focal_weight * bce_loss
-
-        if self.reduction == 'mean':
-            return loss.mean()
-        elif self.reduction == 'sum':
-            return loss.sum()
-        else:
-            return loss
-
-
-class VarifocalLoss(nn.Module):
-    """
-    Varifocal Loss from VFNet paper:
-    https://arxiv.org/abs/2008.13367
-    Compatible with soft targets from TaskAlignedAssigner.
-    """
-    def __init__(self, alpha=0.75, gamma=2.0, reduction='mean'):
-        super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
-        self.reduction = reduction
-
-    def forward(self, pred, target):
-        """
-        Args:
-            pred: Tensor of shape [N, num_classes] - logits (not sigmoid)
-            target: Tensor of shape [N, num_classes] - soft targets from assigner
-        """
-        pred_sigmoid = torch.sigmoid(pred)
-        # Focal weight differs for positive vs negative samples
-        focal_weight = target * (target > 0.0).float() + \
-                       self.alpha * (pred_sigmoid - target).abs().pow(self.gamma) * (target <= 0.0).float()
-
-        loss = F.binary_cross_entropy_with_logits(pred, target, reduction='none') * focal_weight
-
-        if self.reduction == 'mean':
-            return loss.mean()
-        elif self.reduction == 'sum':
-            return loss.sum()
-        else:
-            return loss
 
 class v8DetectionLoss:
     """Criterion class for computing training losses for YOLOv8 object detection."""
@@ -263,8 +207,6 @@ class v8DetectionLoss:
 
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
-        self.cls_loss_fn = FocalLoss(alpha=0.25, gamma=2.0, reduction="none")
-        self.varifocal_loss = VarifocalLoss(alpha=0.75, gamma=2.0, reduction="none")
         self.hyp = h
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
@@ -344,9 +286,8 @@ class v8DetectionLoss:
         target_scores_sum = max(target_scores.sum(), 1)
 
         # Cls loss
-        loss[1] = self.varifocal_loss(pred_scores, target_scores).sum() / target_scores_sum  # VFL way
-        # loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
-        # loss[1] = self.cls_loss_fn(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum
+        # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
+        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
 
         # Bbox loss
         if fg_mask.sum():
@@ -462,8 +403,7 @@ class v8SegmentationLoss(v8DetectionLoss):
     def single_mask_loss(
         gt_mask: torch.Tensor, pred: torch.Tensor, proto: torch.Tensor, xyxy: torch.Tensor, area: torch.Tensor
     ) -> torch.Tensor:
-        """
-        Compute the instance segmentation loss for a single image.
+        """Compute the instance segmentation loss for a single image.
 
         Args:
             gt_mask (torch.Tensor): Ground truth mask of shape (N, H, W), where N is the number of objects.
@@ -495,8 +435,7 @@ class v8SegmentationLoss(v8DetectionLoss):
         imgsz: torch.Tensor,
         overlap: bool,
     ) -> torch.Tensor:
-        """
-        Calculate the loss for instance segmentation.
+        """Calculate the loss for instance segmentation.
 
         Args:
             fg_mask (torch.Tensor): A binary tensor of shape (BS, N_anchors) indicating which anchors are positive.
@@ -648,8 +587,7 @@ class v8PoseLoss(v8DetectionLoss):
         target_bboxes: torch.Tensor,
         pred_kpts: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Calculate the keypoints loss for the model.
+        """Calculate the keypoints loss for the model.
 
         This function calculates the keypoints loss and keypoints object loss for a given batch. The keypoints loss is
         based on the difference between the predicted keypoints and ground truth keypoints. The keypoints object loss is
@@ -823,8 +761,7 @@ class v8OBBLoss(v8DetectionLoss):
     def bbox_decode(
         self, anchor_points: torch.Tensor, pred_dist: torch.Tensor, pred_angle: torch.Tensor
     ) -> torch.Tensor:
-        """
-        Decode predicted object bounding box coordinates from anchor points and distribution.
+        """Decode predicted object bounding box coordinates from anchor points and distribution.
 
         Args:
             anchor_points (torch.Tensor): Anchor points, (h*w, 2).
@@ -918,3 +855,277 @@ class TVPSegmentLoss(TVPDetectLoss):
         vp_loss = self.vp_criterion((vp_feats, pred_masks, proto), batch)
         cls_loss = vp_loss[0][2]
         return cls_loss, vp_loss[1]
+
+
+class AdaptiveWingLoss(nn.Module):
+    """
+    Adaptive Wing Loss - Very robust for localization tasks
+    Combines smooth L1 loss characteristics with adaptive weighting
+    Paper: "Adaptive Wing Loss for Robust Face Alignment via Heatmap Regression"
+    
+    Hyperparameter Guide:
+    ---------------------
+    omega: Controls the loss curvature (nonlinearity strength)
+           - Small objects: 10-12 (less penalty)
+           - Medium objects: 14-16 (default, balanced)
+           - Large objects: 18-20 (more penalty)
+           - Higher omega = steeper loss curve = stricter on errors
+    
+    theta: Threshold between smooth and linear regions
+           - Precise localization: 0.3-0.5 (default)
+           - Tolerant to noise: 0.6-1.0
+           - Very strict: 0.1-0.3
+           - Smaller theta = more pixels treated as hard examples
+    
+    epsilon: Smoothness parameter (numerical stability)
+             - Keep at 1.0 for most cases
+             - Increase to 2.0 if training is unstable
+             - Decrease to 0.5 for very precise tasks
+    
+    alpha: Adaptive parameter (controls target-dependent behavior)
+           - High precision needed: 2.1-2.5 (default)
+           - Moderate precision: 1.5-2.0
+           - Background-heavy: 2.5-3.0
+           - Higher alpha = more adaptive to target values
+    
+    Common Presets:
+    ---------------
+    Small objects (< 32px): omega=10, theta=0.3, epsilon=1, alpha=2.1
+    Medium objects (32-64px): omega=14, theta=0.5, epsilon=1, alpha=2.1 (DEFAULT)
+    Large objects (> 64px): omega=18, theta=0.7, epsilon=1, alpha=2.0
+    Noisy data: omega=12, theta=0.8, epsilon=2, alpha=1.8
+    High precision: omega=16, theta=0.3, epsilon=0.5, alpha=2.5
+    """
+    def __init__(self, omega=14, theta=0.5, epsilon=1, alpha=2.1):
+        super(AdaptiveWingLoss, self).__init__()
+        self.omega = omega
+        self.theta = theta
+        self.epsilon = epsilon
+        self.alpha = alpha
+        
+    def forward(self, pred, target):
+        """
+        pred: predicted heatmap
+        target: ground truth heatmap
+        """
+        delta = (target - pred).abs()
+        
+        A = self.omega * (1 / (1 + torch.pow(self.theta / self.epsilon, self.alpha - target))) * \
+            (self.alpha - target) * torch.pow(self.theta / self.epsilon, self.alpha - target - 1) * \
+            (1 / self.epsilon)
+        C = self.theta * A - self.omega * torch.log(1 + torch.pow(self.theta / self.epsilon, self.alpha - target))
+        
+        losses = torch.where(
+            delta < self.theta,
+            self.omega * torch.log(1 + torch.pow(delta / self.epsilon, self.alpha - target)),
+            A * delta - C
+        )
+        
+        return losses.mean()
+
+def focal_loss(pred, target, alpha=2, gamma=4, reduction = 'mean'):
+    bce_loss = F.binary_cross_entropy_with_logits(pred, target, reduction='none')
+    pt = torch.exp(-bce_loss)
+    focal_loss = alpha * (1. - pt) ** gamma * bce_loss
+    if reduction == 'mean':
+        return torch.mean(focal_loss)
+    elif reduction == 'sum':
+        return torch.sum(focal_loss)
+    else:
+        return focal_loss
+
+
+def focal_loss_continuous(pred, target, alpha=2, beta=4):
+    """
+    Treat the problem as continuous - no hard threshold.
+    Pixels are weighted by their target value.
+    """
+    # Separate positive and negative regions (but not binary)
+    pos_inds = target.ge(0.01).float()  # Any non-zero pixel
+    neg_inds = target.lt(0.01).float()
+    
+    # Positive loss: weighted by target value (higher target = more important)
+    pos_weights = torch.pow(1 - pred, alpha)
+    pos_loss = torch.log(pred + 1e-12) * pos_weights * pos_inds * target  # ← weighted by target!
+    
+    # Negative loss: standard focal term
+    neg_weights = torch.pow(1 - target, beta) * torch.pow(pred, alpha)
+    neg_loss = torch.log(1 - pred + 1e-12) * neg_weights * neg_inds
+    
+    num_pos = pos_inds.sum().clamp(min=1)
+    loss = -(pos_loss.sum() + neg_loss.sum()) / num_pos
+    
+    return loss
+
+class HeatmapLoss:
+    """Criterion class for computing training losses for YOLOv8 object detection."""
+
+    def __init__(self, model, tal_topk: int = 10):  # model must be de-paralleled
+        """Initialize v8DetectionLoss with model parameters and task-aligned assignment settings."""
+        device = next(model.parameters()).device  # get model device
+        h = model.args  # hyperparameters
+
+        m = model.model[-1]  # Detect() module
+        self.bce = nn.BCEWithLogitsLoss(reduction="none")
+        self.hyp = h
+        self.stride = m.stride  # model strides
+        self.nc = m.nc  # number of classes
+        self.no = m.nc + m.reg_max * 4
+        self.reg_max = m.reg_max
+        self.device = device
+
+        self.use_dfl = m.reg_max > 1
+
+        self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
+        self.bbox_loss = BboxLoss(m.reg_max).to(device)
+        self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
+
+        # self.hm_loss = AdaptiveWingLoss()
+        self.hm_loss = nn.MSELoss()
+
+    def preprocess(self, targets: torch.Tensor, batch_size: int, scale_tensor: torch.Tensor) -> torch.Tensor:
+        """Preprocess targets by converting to tensor format and scaling coordinates."""
+        nl, ne = targets.shape
+        if nl == 0:
+            out = torch.zeros(batch_size, 0, ne - 1, device=self.device)
+        else:
+            i = targets[:, 0]  # image index
+            _, counts = i.unique(return_counts=True)
+            counts = counts.to(dtype=torch.int32)
+            out = torch.zeros(batch_size, counts.max(), ne - 1, device=self.device)
+            for j in range(batch_size):
+                matches = i == j
+                if n := matches.sum():
+                    out[j, :n] = targets[matches, 1:]
+            out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
+        return out
+
+    def bbox_decode(self, anchor_points: torch.Tensor, pred_dist: torch.Tensor) -> torch.Tensor:
+        """Decode predicted object bounding box coordinates from anchor points and distribution."""
+        if self.use_dfl:
+            b, a, c = pred_dist.shape  # batch, anchors, channels
+            pred_dist = pred_dist.view(b, a, 4, c // 4).softmax(3).matmul(self.proj.type(pred_dist.dtype))
+            # pred_dist = pred_dist.view(b, a, c // 4, 4).transpose(2,3).softmax(3).matmul(self.proj.type(pred_dist.dtype))
+            # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
+        return dist2bbox(pred_dist, anchor_points, xywh=False)
+
+    def cal_heatmap_loss(self, outs, gts, use_ct = False):
+        outs = outs.squeeze()
+        loss = self.hm_loss(outs, gts).sum() # + focal_loss(outs, gts) # TODO: phải trả outs/gain 
+        # if torch.count_nonzero(gts):
+        #     loss = self.mse(outs, gts).sum()/torch.count_nonzero(gts)
+        # else:
+        #     loss = self.mse(outs, gts).sum()
+        return loss
+    
+    def __call__(self, preds: Any, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
+        """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
+        use_ct = self.hyp.contrastive
+        if use_ct:
+            loss = torch.zeros(5, device=self.device)  # box, cls, dfl, heatmap
+            feats, heatmap = preds[0]
+            saved_feats = preds[1]
+        else:
+            loss = torch.zeros(4, device=self.device)  # box, cls, dfl, heatmap
+            feats, heatmap = preds if len(preds) == 2 else preds[1]
+        feats = feats[1] if isinstance(feats, tuple) else feats
+        
+        pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
+            (self.reg_max * 4, self.nc), 1
+        )
+
+        pred_scores = pred_scores.permute(0, 2, 1).contiguous()
+        pred_distri = pred_distri.permute(0, 2, 1).contiguous()
+
+        dtype = pred_scores.dtype
+        batch_size = pred_scores.shape[0]
+        imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
+        anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
+
+        # Targets
+        targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
+        targets = self.preprocess(targets, batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
+        gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
+        mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
+
+        # Pboxes
+        pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
+        # dfl_conf = pred_distri.view(batch_size, -1, 4, self.reg_max).detach().softmax(-1)
+        # dfl_conf = (dfl_conf.amax(-1).mean(-1) + dfl_conf.amax(-1).amin(-1)) / 2
+
+        _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
+            # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
+            pred_scores.detach().sigmoid(),
+            (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
+            anchor_points * stride_tensor,
+            gt_labels,
+            gt_bboxes,
+            mask_gt,
+        )
+
+        target_scores_sum = max(target_scores.sum(), 1)
+
+        # Cls loss
+        # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
+        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+
+        # Bbox loss
+        if fg_mask.sum():
+            loss[0], loss[2] = self.bbox_loss(
+                pred_distri,
+                pred_bboxes,
+                anchor_points,
+                target_bboxes / stride_tensor,
+                target_scores,
+                target_scores_sum,
+                fg_mask,
+            )
+
+        loss[0] *= self.hyp.box  # box gain
+        loss[1] *= self.hyp.cls  # cls gain
+        loss[2] *= self.hyp.dfl  # dfl gain
+
+        # Heatmap loss
+        loss[3] = self.cal_heatmap_loss(heatmap, batch['heatmaps'])
+        loss[3] *= self.hyp.hm
+
+        # Contrastive loss
+        if use_ct:
+            labels = torch.zeros(heatmap.shape[0]).to(heatmap.device)
+            labels[torch.unique(batch['batch_idx']).to(torch.int)] = 1
+
+            pos_mask = labels.unsqueeze(0) == labels.unsqueeze(1)  # [B, B]
+            neg_mask = ~pos_mask  # tất cả các cặp khác label
+
+            pos_mask.fill_diagonal_(False)  # loại bỏ self-pairs
+            temperature = 0.1
+
+            ct_losses = []
+            for s in [2, 4, 6, 10]:
+                f = saved_feats[s]
+                pool_f = torch.nn.AdaptiveAvgPool2d(output_size=5)(f).mean((2, 3))
+                norm_f = F.normalize(pool_f, dim = 1)
+                cosine_sim = (norm_f @ norm_f.t())
+                margin = 0.5
+                if pos_mask.sum() > 0:
+                    pos_loss = 1 - (cosine_sim[pos_mask]).mean()
+                else: pos_loss = torch.zeros([], device=heatmap.device)
+                if neg_mask.sum() > 0:
+                    neg_loss = torch.clamp(cosine_sim[neg_mask] - margin, min=0).mean()
+                else: neg_loss = torch.zeros([], device=heatmap.device)
+                _loss = pos_loss + 10*neg_loss
+
+                # sim = cosine_sim/temperature
+                # exp_sim = torch.exp(sim)    # [B, B]
+                # pos_exp = (exp_sim * pos_mask).sum(dim=1)  # [B]
+                # neg_exp = (exp_sim * neg_mask).sum(dim=1)  # [B]
+                # mask_valid = pos_exp > 0
+                # loss_per_sample = -torch.log(pos_exp / (pos_exp + neg_exp))
+                # loss_per_sample = loss_per_sample[mask_valid]
+                # _loss = loss_per_sample.mean()
+                ct_losses.append(_loss)
+            ct_loss = torch.stack(ct_losses).mean()
+
+            loss[4] = ct_loss * self.hyp.ct
+        
+        return loss * batch_size, loss.detach()  # loss(box, cls, dfl)

@@ -9,8 +9,68 @@ import pydicom
 from PIL import Image
 from tqdm import tqdm
 
-sys.path.append(os.getcwd())
-from utils.classes import CLASS_COLORS_BGR, CLASSES
+CLASSES = [
+    "Aortic enlargement",
+    "Atelectasis",
+    "Calcification",
+    "Cardiomegaly",
+    "Consolidation",
+    "ILD",
+    "Infiltration",
+    "Lung Opacity",
+    "Nodule/Mass",
+    "Other lesion",
+    "Pleural effusion",
+    "Pleural thickening",
+    "Pneumothorax",
+    "Pulmonary fibrosis",
+]
+
+CLASSES_VN = [
+    "Phình động mạch chủ",
+    "Xẹp phổi",
+    "Vôi hóa",
+    "Tim to",
+    "Đông đặc phổi",
+    "Bệnh phổi kẽ",
+    "Thâm nhiễm",
+    "Đục/Mờ phổi",
+    "Nốt/ Khối u",
+    "Tổn thương khác",
+    "Tràn dịch màng phổi",
+    "Dày màng phổi",
+    "Tràn khí màng phổi",
+    "Xơ phổi",
+]
+
+CLASS_COLORS_BGR = {
+    "Aortic enlargement": (180, 119, 31),   # #1f77b4
+    "Atelectasis": (14, 127, 255),          # #ff7f0e
+    "Calcification": (44, 160, 44),         # #2ca02c
+    "Cardiomegaly": (40, 39, 214),          # #d62728
+    "Consolidation": (189, 103, 148),       # #9467bd
+    "ILD": (75, 86, 140),                   # #8c564b
+    "Infiltration": (194, 119, 227),        # #e377c2
+    "Lung Opacity": (127, 127, 127),        # #7f7f7f
+    "Nodule/Mass": (34, 189, 188),          # #bcbd22
+    "Other lesion": (207, 190, 23),         # #17becf
+    "Pleural effusion": (147, 20, 255),     # #ff1493
+    "Pleural thickening": (209, 206, 0),    # #00ced1
+    "Pneumothorax": (0, 215, 255),          # #ffd700
+    "Pulmonary fibrosis": (34, 139, 34),    # #228b22
+}
+
+IGNORE_CLASS = [
+    "Clavicle fracture",
+    "Edema",
+    "Emphysema",
+    "Enlarged PA",
+    "Lung cavity",
+    "Lung cyst",
+    "Mediastinal shift",
+    " Rib fracture"
+]
+
 
 
 def resize_and_pad_image(img, target_size=1280, pad_value=0):
@@ -61,10 +121,10 @@ def get_image(dicom_path):
     return img
 
 def process(target_size, rad_scores, iou_thresh):
-    annotations = pd.read_csv('datasets/annotations_train.csv')
+    annotations = pd.read_csv('datasets/annotations_test.csv')
     group_imageIDs = annotations.groupby('image_id')
     
-    save_dir = 'datasets/process'
+    save_dir = 'datasets/test'
     os.makedirs(f'{save_dir}/images', exist_ok=True)
     os.makedirs(f'{save_dir}/labels_with_score', exist_ok=True)
     os.makedirs(f'{save_dir}/labels', exist_ok=True)
@@ -74,10 +134,9 @@ def process(target_size, rad_scores, iou_thresh):
 
         
         if not os.path.exists(f'{save_dir}/images/{image_id}.png'):
-            img = get_image(f'datasets/train/{image_id}.dicom')
+            img = get_image(f'/media/hoangtv/0f9d3910-0ff9-406c-92e1-c2c8170ca6f42/Ty/vindr_cxr/test/{image_id}.dicom')
             img, scale, pad_x, pad_y = resize_and_pad_image(img, target_size, pad_value=0)
             cv2.imwrite(f'{save_dir}/images/{image_id}.png', img)
-            continue
 
         if not has_finding:
             with open(f'{save_dir}/labels/{image_id}.txt', 'w') as f:
@@ -90,21 +149,21 @@ def process(target_size, rad_scores, iou_thresh):
                 'boxes': [],
                 'scores': []
             }    
-            rad_ids = list(annos['rad_id'])
+            # rad_ids = list(annos['rad_id'])
             class_names = list(annos['class_name'])
             group_class = annos.groupby('class_name')
             for c, gr in group_class:
                 if len(gr) == 1:
-                    r = str(gr['rad_id'].iloc[0])
+                    # r = str(gr['rad_id'].iloc[0])
                     b = [float(gr['x_min'].iloc[0]), float(gr['y_min'].iloc[0]), float(gr['x_max'].iloc[0]), float(gr['y_max'].iloc[0])]
-                    stores["radID"].append(r)
+                    # stores["radID"].append(r)
                     stores["classID"].append(c)
                     stores["boxes"].append(b)
                     stores["scores"].append(0.5)
                 else:
-                    rads = np.unique(gr['rad_id'])
-                    all_rads = np.array(gr['rad_id'])
-                    num_unique_rads = len(rads)
+                    # rads = np.unique(gr['rad_id'])
+                    # all_rads = np.array(gr['rad_id'])
+                    # num_unique_rads = len(rads)
 
                     boxes = np.array([list(gr['x_min']), list(gr['y_min']), list(gr['x_max']), list(gr['y_max'])]).T
                     n = len(boxes)
@@ -155,14 +214,14 @@ def process(target_size, rad_scores, iou_thresh):
                                     
                                     merge_box = [x1m, y1m, x2m, y2m]
                                 merge_box = np.array(merge_box, dtype = np.int32).tolist()
-                                merge_rad = all_rads[box_merge_idx].flatten().tolist() + [all_rads[b_id]]
-                                stores["radID"].append(merge_rad)
+                                # merge_rad = all_rads[box_merge_idx].flatten().tolist() + [all_rads[b_id]]
+                                # stores["radID"].append(merge_rad)
                                 stores["classID"].append(c)
                                 stores["boxes"].append(merge_box)
-                                stores["scores"].append(rad_scores[len(merge_rad)] if len(merge_rad) <= 3 else rad_scores[3])
+                                # stores["scores"].append(rad_scores[len(merge_rad)] if len(merge_rad) <= 3 else rad_scores[3])
                                 already_merge += box_merge_idx.flatten().tolist()
                             else:
-                                stores["radID"].append(list(gr['rad_id'])[b_id])
+                                # stores["radID"].append(list(gr['rad_id'])[b_id])
                                 stores["classID"].append(c)
                                 stores["boxes"].append(boxes[b_id])
                                 stores["scores"].append(0.5)
@@ -171,12 +230,12 @@ def process(target_size, rad_scores, iou_thresh):
             # write to file  
             box_after = np.array(stores['boxes']).astype(np.uint16)
             class_after = np.array(stores['classID'])
-            rad_after = list(stores['radID'])
+            # rad_after = list(stores['radID'])
             scores = list(stores['scores'])
             
             with open(f'{save_dir}/labels_with_score/{image_id}.txt', 'w') as f:
                 with open(f'{save_dir}/labels/{image_id}.txt', 'w') as fraw:
-                    for b, c, r, s in zip(box_after, class_after, rad_after, scores):
+                    for b, c, s in zip(box_after, class_after, scores):
                         b = transform_bboxes(b, scale, pad_x, pad_y)
                         xywh = xyxy2scale_xywh(b, target_size)
                         if c not in CLASSES:
@@ -194,22 +253,21 @@ def process(target_size, rad_scores, iou_thresh):
             ymax = np.array(annos['y_max'])
             box_before = np.array([xmin, ymin, xmax, ymax]).T.astype(np.uint16)
             class_before = list(annos['class_name'])
-            rad_before = list(annos['rad_id'])
-            for bb, cb, rb in zip(box_before, class_before, rad_before):
+            # rad_before = list(annos['rad_id'])
+            for bb, cb in zip(box_before, class_before):
                 bb = transform_bboxes(bb, scale, pad_x, pad_y)
                 if cb not in CLASSES:
                     continue
                 before = cv2.rectangle(before, bb[:2], bb[2:], CLASS_COLORS_BGR[cb], 2)
-                before = cv2.putText(before, f'{rb[1:]}', (bb[0]+10, bb[1]+20), cv2.FONT_HERSHEY_DUPLEX, 0.7, CLASS_COLORS_BGR[cb], 1)
+                # before = cv2.putText(before, f'{rb[1:]}', (bb[0]+10, bb[1]+20), cv2.FONT_HERSHEY_DUPLEX, 0.7, CLASS_COLORS_BGR[cb], 1)
 
             
             after = img.copy()
-            for ba, ca, ra in zip(box_after, class_after, rad_after):
+            for ba, ca in zip(box_after, class_after):
                 ba = transform_bboxes(ba, scale, pad_x, pad_y)
                 if ca not in CLASSES:
                     continue
                 after = cv2.rectangle(after, ba[:2], ba[2:], CLASS_COLORS_BGR[ca], 2)
-                after = cv2.putText(after, f'{ra[1:] if isinstance(ra, str) else "_".join(ra)}', (ba[0]+10, ba[1]+20), cv2.FONT_HERSHEY_DUPLEX, 0.7, CLASS_COLORS_BGR[ca], 1)
 
             visualize = np.hstack([before, after])
             visualize = cv2.putText(visualize, image_id, (100, 100), cv2.FONT_HERSHEY_COMPLEX, 2, (255, 0, 0), 1)
@@ -232,5 +290,5 @@ if __name__ == '__main__':
         3: 1,
     }
     target_size = 1280
-    iou_thresh = 0.4
+    iou_thresh = 1.0
     process(target_size, rad_scores, iou_thresh)

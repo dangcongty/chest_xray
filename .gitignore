@@ -17,3 +17,14 @@ runs/
 *.pt
 .vscode/
 lung_seg/
+*.deb
+ckpt/
+*.json
+*.png
+*.txt
+
+__pycache__/
+/train.py
+/val.py
+/train_heatmap.py
+/.~lock*
