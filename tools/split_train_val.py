@@ -74,6 +74,16 @@ class YOLODatasetSplitter:
 
     # --------------------------------------------------
     def stratified_split(self, dataset):
+        """
+        Split dataset with balanced class distribution.
+
+        Strategy:
+        - Group images by their dominant class (class with most boxes in that image).
+        - Within each class group, shuffle and split by val_ratio.
+        - Background images are shuffled and split separately by val_ratio.
+
+        This ensures each class is proportionally represented in both train and val.
+        """
         images_with_obj = []
         bg_images = []
 
@@ -83,49 +93,48 @@ class YOLODatasetSplitter:
             else:
                 images_with_obj.append(img)
 
-        # ---- split images with objects (box-aware) ----
-        img_infos = []
+        # ---- Group images by dominant class ----
+        class_groups = defaultdict(list)
         for img in images_with_obj:
             anns = dataset[img]
-            img_infos.append({
-                "name": img,
-                "n_boxes": len(anns),
-                "classes": [a[0] for a in anns]
-            })
-
-        # sort large box images first
-        img_infos.sort(key=lambda x: x["n_boxes"], reverse=True)
+            # dominant class = most frequent class in this image
+            class_count = defaultdict(int)
+            for ann in anns:
+                class_count[ann[0]] += 1
+            dominant_cls = max(class_count, key=class_count.get)
+            class_groups[dominant_cls].append(img)
 
         train, val = [], []
-        train_boxes = 0
-        val_boxes = 0
         train_cls = defaultdict(int)
         val_cls = defaultdict(int)
 
-        total_boxes = sum(x["n_boxes"] for x in img_infos)
-        target_val_boxes = total_boxes * self.val_ratio
+        # ---- Split each class group by val_ratio ----
+        for cls, imgs in class_groups.items():
+            imgs = imgs.copy()
+            np.random.shuffle(imgs)
 
-        for info in img_infos:
-            if val_boxes < target_val_boxes:
-                val.append(info["name"])
-                val_boxes += info["n_boxes"]
-                for c in info["classes"]:
-                    val_cls[c] += 1
-            else:
-                train.append(info["name"])
-                train_boxes += info["n_boxes"]
-                for c in info["classes"]:
-                    train_cls[c] += 1
+            n_val = max(1, int(len(imgs) * self.val_ratio))  # at least 1 val per class
+            val_imgs = imgs[:n_val]
+            train_imgs = imgs[n_val:]
 
-        # ---- split background images (image ratio) ----
+            val.extend(val_imgs)
+            train.extend(train_imgs)
+
+            for img in val_imgs:
+                for ann in dataset[img]:
+                    val_cls[ann[0]] += 1
+
+            for img in train_imgs:
+                for ann in dataset[img]:
+                    train_cls[ann[0]] += 1
+
+        # ---- Split background images by val_ratio ----
         np.random.shuffle(bg_images)
-        bg_val_count = int(len(bg_images) * self.val_ratio)
-
-        val += bg_images[:bg_val_count]
-        train += bg_images[bg_val_count:]
+        n_bg_val = int(len(bg_images) * self.val_ratio)
+        val += bg_images[:n_bg_val]
+        train += bg_images[n_bg_val:]
 
         return train, val, train_cls, val_cls
-
 
     # --------------------------------------------------
     def print_statistics(self, dataset, train, val, train_cls, val_cls):
@@ -144,11 +153,14 @@ class YOLODatasetSplitter:
         print(f"  Val:   {val_boxes}")
 
         print("\nClass distribution:")
-        print(f"{'Class':<8} {'Train':<10} {'Val':<10} {'Total'}")
-        for c in sorted(set(train_cls) | set(val_cls)):
+        print(f"{'Class':<8} {'Train':<10} {'Val':<10} {'Total':<10} {'Val%'}")
+        all_classes = sorted(set(train_cls) | set(val_cls))
+        for c in all_classes:
             t = train_cls[c]
             v = val_cls[c]
-            print(f"{c:<8} {t:<10} {v:<10} {t+v}")
+            total_cls = t + v
+            val_pct = v / total_cls * 100 if total_cls > 0 else 0
+            print(f"{c:<8} {t:<10} {v:<10} {total_cls:<10} {val_pct:.1f}%")
 
     # --------------------------------------------------
     def split_and_organize(self, images_dir, labels_dir, output_dir, copy_files=True):
@@ -166,8 +178,8 @@ class YOLODatasetSplitter:
 
         # write txt
         output_dir.mkdir(parents=True, exist_ok=True)
-        train_txt = output_dir / "train.txt"
-        val_txt = output_dir / "val.txt"
+        train_txt = output_dir / "train_1k_bg.txt"
+        val_txt = output_dir / "val_1k_bg.txt"
 
         with open(train_txt, "w") as f:
             for n in train:
@@ -196,7 +208,7 @@ class YOLODatasetSplitter:
 splitter = YOLODatasetSplitter(
     val_ratio=0.2,
     random_seed=42,
-    limit_bg=0   # None nếu không muốn giới hạn background
+    limit_bg=1000   # None nếu không muốn giới hạn background
 )
 
 splitter.split_and_organize(

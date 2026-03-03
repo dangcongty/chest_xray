@@ -4,11 +4,12 @@ from glob import glob
 import numpy as np
 from matplotlib import pyplot as plt
 
-for path in glob('datasets/heatmap/*'):
+for path in glob('datasets/process/heatmap/*'):
+    path = 'datasets/process/heatmap/2cd31f05e3d0a2ebdf33e7a90fdc95ac.npy'
     heatmap = np.load(path)
     if heatmap.sum() < 1:
         continue
-    print(path)
+    print(path, heatmap.sum(), heatmap.max())
     fig, axes = plt.subplots(1, 2, figsize=(14, 6))
     image_shape = (640, 640)
     # Plot 1: Heatmap with bounding boxes
@@ -33,4 +34,5 @@ for path in glob('datasets/heatmap/*'):
     fig.colorbar(surf, ax=ax, shrink=0.5)
 
     plt.tight_layout()
-    plt.show()
+    plt.savefig('test.jpg')
+    exit()

@@ -198,7 +198,7 @@ def bbox_to_gaussian_heatmap_gpu(bboxes, image_shape, sigma_factor=0.3, device='
     return heatmap.clamp(0, 1)
 
 
-def process_batch_gpu(label_paths, image_shape=(640, 640), sigma_factor=0.3, device='cuda', batch_size=32):
+def process_batch_gpu(label_paths, image_shape=(640, 640), sigma_factor=0.15, device='cuda', batch_size=32):
     """
     Process multiple labels in batches on GPU for maximum efficiency.
     """
@@ -231,7 +231,7 @@ def process_batch_gpu(label_paths, image_shape=(640, 640), sigma_factor=0.3, dev
                 [np.ones(box_xyxy.shape[0]).tolist()], 
                 [[0] * len(classes)],
                 weights=None,
-                iou_thr=0.5, skip_box_thr=0.0
+                iou_thr=0.9, skip_box_thr=0.0
             )
             boxes = boxes * image_shape[0]
             
@@ -243,13 +243,13 @@ def process_batch_gpu(label_paths, image_shape=(640, 640), sigma_factor=0.3, dev
 
 
 # Main processing
-os.makedirs('datasets/heatmap', exist_ok=True)
+os.makedirs('datasets/heatmap_v2', exist_ok=True)
 
 # Check if CUDA is available
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 print(f"Using device: {device}")
 
-label_paths = glob('datasets/labels/*.txt')
+label_paths = glob('datasets/process/labels/*.txt')
 
 if device == 'cuda':
     # GPU batch processing
@@ -258,11 +258,11 @@ if device == 'cuda':
     
     for i in tqdm(range(0, len(label_paths), batch_size)):
         batch_paths = label_paths[i:i+batch_size]
-        results = process_batch_gpu(batch_paths, batch_size=batch_size, device=device)
+        results = process_batch_gpu(batch_paths, batch_size=batch_size, device=device, sigma_factor = 0.1)
         
         # Save results
         for path, heatmap in results.items():
-            np.save(f'datasets/heatmap/{os.path.basename(path)[:-4]}.npy', heatmap)
+            np.save(f'datasets/heatmap_v2/{os.path.basename(path)[:-4]}.npy', heatmap)
 else:
     # Fallback to CPU (still faster than original)
     print("CUDA not available, using CPU...")
@@ -273,7 +273,7 @@ else:
         image_shape = (640, 640)
         if not len(label):
             heatmap = np.zeros(image_shape)
-            np.save(f'datasets/heatmap/{os.path.basename(path)[:-4]}.npy', heatmap)
+            np.save(f'datasets/heatmap_v2/{os.path.basename(path)[:-4]}.npy', heatmap)
             continue
         
         classes = [int(lb.strip().split()[0]) for lb in label]

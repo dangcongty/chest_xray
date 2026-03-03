@@ -7,7 +7,7 @@ import os
 import random
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlsplit
 
 import numpy as np
@@ -50,7 +50,7 @@ class InfiniteDataLoader(dataloader.DataLoader):
 
     Methods:
         __len__: Return the length of the batch sampler's sampler.
-        __iter__: Create a sampler that repeats indefinitely.
+        __iter__: Yield batches from the underlying iterator.
         __del__: Ensure workers are properly terminated.
         reset: Reset the iterator, useful when modifying dataset settings during training.
 
@@ -103,7 +103,7 @@ class _RepeatSampler:
     dataset without recreating the sampler.
 
     Attributes:
-        sampler (Dataset.sampler): The sampler to repeat.
+        sampler (torch.utils.data.Sampler): The sampler to repeat.
     """
 
     def __init__(self, sampler: Any):
@@ -114,94 +114,6 @@ class _RepeatSampler:
         """Iterate over the sampler indefinitely, yielding its contents."""
         while True:
             yield from iter(self.sampler)
-
-
-class BalancedContiguousDistributedSampler(torch.utils.data.Sampler):
-    """
-    Distributed sampler that balances 50% object images and 50% background images
-    while assigning contiguous chunks per rank (GPU).
-
-    Compatible with Ultralytics YOLO datasets.
-    """
-
-    def __init__(
-        self,
-        dataset: Dataset,
-        num_replicas: int | None = None,
-        rank: int | None = None,
-        shuffle: bool = True,
-    ) -> None:
-        if num_replicas is None:
-            num_replicas = dist.get_world_size() if dist.is_initialized() else 1
-        if rank is None:
-            rank = dist.get_rank() if dist.is_initialized() else 0
-
-        self.dataset = dataset
-        self.num_replicas = num_replicas
-        self.rank = rank
-        self.shuffle = shuffle
-        self.epoch = 0
-
-        # 🔑 YOLO labels: len(label) > 0 => object
-        from tqdm import tqdm
-        self.obj_indices = []
-        self.bg_indices = []
-        for i, lb in enumerate(tqdm(dataset.labels)):
-            if (0 in lb['cls'] or 3 in lb['cls']) and len(lb['cls']) == 1:
-                self.bg_indices.append(i)
-                continue
-            if len(lb['cls']) > 0:
-                self.obj_indices.append(i)
-            else:
-                self.bg_indices.append(i)
-
-        assert self.obj_indices, "No object images found"
-        assert self.bg_indices, "No background images found"
-
-        # Make both lists same length for perfect alternation
-        max_len = max(len(self.obj_indices), len(self.bg_indices))
-        self.obj_indices = self._repeat_to_length(self.obj_indices, max_len)
-        self.bg_indices  = self._repeat_to_length(self.bg_indices, max_len)
-
-        self.total_size = 2 * max_len  # obj + bg interleaved
-
-    @staticmethod
-    def _repeat_to_length(indices: list[int], length: int) -> list[int]:
-        """Repeat indices list to reach target length."""
-        reps = math.ceil(length / len(indices))
-        return (indices * reps)[:length]
-
-    def _get_rank_range(self, total_len: int) -> tuple[int, int]:
-        """Contiguous split like ContiguousDistributedSampler."""
-        per_rank = total_len // self.num_replicas
-        remainder = total_len % self.num_replicas
-
-        start = self.rank * per_rank + min(self.rank, remainder)
-        end = start + per_rank + (1 if self.rank < remainder else 0)
-        return start, end
-
-    def __iter__(self) -> Iterator[int]:
-        # Interleave obj / bg → [obj0, bg0, obj1, bg1, ...]
-        indices = []
-        for o, b in zip(self.obj_indices, self.bg_indices):
-            indices.append(o)
-            indices.append(b)
-
-        if self.shuffle:
-            g = torch.Generator()
-            g.manual_seed(self.epoch)
-            perm = torch.randperm(len(indices), generator=g).tolist()
-            indices = [indices[i] for i in perm]
-
-        start, end = self._get_rank_range(len(indices))
-        return iter(indices[start:end])
-
-    def __len__(self) -> int:
-        start, end = self._get_rank_range(self.total_size)
-        return end - start
-
-    def set_epoch(self, epoch: int) -> None:
-        self.epoch = epoch
 
 
 class ContiguousDistributedSampler(torch.utils.data.Sampler):
@@ -219,7 +131,7 @@ class ContiguousDistributedSampler(torch.utils.data.Sampler):
     Args:
         dataset (Dataset): Dataset to sample from. Must implement __len__.
         num_replicas (int, optional): Number of distributed processes. Defaults to world size.
-        batch_size (int, optional): Batch size used by dataloader. Defaults to dataset batch size.
+        batch_size (int, optional): Batch size used by dataloader. Defaults to dataset.batch_size or 1.
         rank (int, optional): Rank of current process. Defaults to current rank.
         shuffle (bool, optional): Whether to shuffle indices within each rank's chunk. Defaults to False. When True,
             shuffling is deterministic and controlled by set_epoch() for reproducibility.
@@ -383,14 +295,13 @@ def build_dataloader(
     rank: int = -1,
     drop_last: bool = False,
     pin_memory: bool = True,
-    mode = 'val'
 ) -> InfiniteDataLoader:
-    """Create and return an InfiniteDataLoader or DataLoader for training or validation.
+    """Create and return an InfiniteDataLoader for training or validation.
 
     Args:
         dataset (Dataset): Dataset to load data from.
         batch (int): Batch size for the dataloader.
-        workers (int): Number of worker threads for loading data.
+        workers (int): Number of worker processes for data loading.
         shuffle (bool, optional): Whether to shuffle the dataset.
         rank (int, optional): Process rank in distributed training. -1 for single-GPU training.
         drop_last (bool, optional): Whether to drop the last incomplete batch.
@@ -414,24 +325,56 @@ def build_dataloader(
         if shuffle
         else ContiguousDistributedSampler(dataset)
     )
-    if mode == 'train':
-        sampler = BalancedContiguousDistributedSampler(dataset, shuffle=shuffle)
     generator = torch.Generator()
     generator.manual_seed(6148914691236517205 + RANK)
-    return InfiniteDataLoader(
-        dataset=dataset,
-        batch_size=batch,
-        shuffle=shuffle and sampler is None,
-        num_workers=nw,
-        sampler=sampler,
-        prefetch_factor=4 if nw > 0 else None,  # increase over default 2
-        pin_memory=nd > 0 and pin_memory,
-        collate_fn=getattr(dataset, "collate_fn", None),
-        worker_init_fn=seed_worker,
-        generator=generator,
-        drop_last=drop_last and len(dataset) % batch != 0,
-    )
-
+    # return InfiniteDataLoader(
+    #     dataset=dataset,
+    #     batch_size=batch,
+    #     shuffle=shuffle and sampler is None,
+    #     num_workers=nw,
+    #     sampler=sampler,
+    #     prefetch_factor=4 if nw > 0 else None,  # increase over default 2
+    #     pin_memory=nd > 0 and pin_memory,
+    #     collate_fn=getattr(dataset, "collate_fn", None),
+    #     worker_init_fn=seed_worker,
+    #     generator=generator,
+    #     drop_last=drop_last and len(dataset) % batch != 0,
+    # )
+    use_oversample = True
+    oversample_beta = 0.5
+    oversample_strategy = 'mean'
+    # train
+    if shuffle == True: 
+        return InfiniteDataLoaderV2(
+            dataset=dataset,
+            batch_size=batch,
+            shuffle=shuffle and sampler is None and not use_oversample,
+            num_workers=nw,
+            sampler=sampler,
+            prefetch_factor=4 if nw > 0 else None,
+            pin_memory=nd > 0 and pin_memory,
+            collate_fn=getattr(dataset, "collate_fn", None),
+            worker_init_fn=seed_worker,
+            generator=generator,
+            drop_last=drop_last and len(dataset) % batch != 0,
+            oversample=use_oversample,
+            oversample_beta=oversample_beta,
+            oversample_strategy=oversample_strategy,
+        )
+    else:
+        return InfiniteDataLoader(
+            dataset=dataset,
+            batch_size=batch,
+            shuffle=shuffle and sampler is None,
+            num_workers=nw,
+            sampler=sampler,
+            prefetch_factor=4 if nw > 0 else None,  # increase over default 2
+            pin_memory=nd > 0 and pin_memory,
+            collate_fn=getattr(dataset, "collate_fn", None),
+            worker_init_fn=seed_worker,
+            generator=generator,
+            drop_last=drop_last and len(dataset) % batch != 0,
+        )
 
 def check_source(
     source: str | int | Path | list | tuple | np.ndarray | Image.Image | torch.Tensor,
@@ -493,7 +436,8 @@ def load_inference_source(
     """Load an inference source for object detection and apply necessary transformations.
 
     Args:
-        source (str | Path | list | tuple | torch.Tensor | PIL.Image | np.ndarray): The input source for inference.
+        source (str | int | Path | list | tuple | np.ndarray | PIL.Image | torch.Tensor): The input source for
+            inference.
         batch (int, optional): Batch size for dataloaders.
         vid_stride (int, optional): The frame interval for video sources.
         buffer (bool, optional): Whether stream frames will be buffered.
@@ -530,3 +474,238 @@ def load_inference_source(
     setattr(dataset, "source_type", source_type)
 
     return dataset
+
+
+
+def _extract_labels(dataset) -> List[np.ndarray]:
+    """Extract class arrays from YOLO-style dataset.labels."""
+    raw = getattr(dataset, "labels", None)
+    if raw is None:
+        raise AttributeError("Dataset must have a `labels` attribute.")
+    out = []
+    for entry in raw:
+        if isinstance(entry, dict):
+            cls = entry.get("cls", np.array([]))
+        else:
+            cls = entry
+        out.append(np.asarray(cls).flatten())
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Diagnosis — gọi trước khi train
+# ---------------------------------------------------------------------------
+
+def diagnose_dataset(dataset, class_names: Optional[List[str]] = None) -> Dict:
+    """
+    In thống kê phân phối class. Gọi trước khi train để verify.
+
+    Usage:
+        diagnose_dataset(train_dataset, class_names=CLASS_NAMES)
+    """
+    labels = _extract_labels(dataset)
+    nc = int(max(c for lb in labels for c in lb) + 1) if labels else 1
+
+    class_counts = np.zeros(nc, dtype=np.int64)
+    images_per_class = np.zeros(nc, dtype=np.int64)
+    multi_class_images = 0
+
+    for lb in labels:
+        unique_cls = set(int(c) for c in lb)
+        if len(unique_cls) > 1:
+            multi_class_images += 1
+        for c in lb:
+            class_counts[int(c)] += 1
+        for c in unique_cls:
+            images_per_class[c] += 1
+
+    freq = class_counts / np.maximum(class_counts.sum(), 1)
+    weights = 1.0 / np.maximum(freq, 1e-8)
+    weights /= weights.sum()
+
+    print("\n" + "=" * 65)
+    print(f"{'CLASS':<30} {'INSTANCES':>10} {'IMAGES':>10} {'WEIGHT':>10}")
+    print("=" * 65)
+    for i in range(nc):
+        name = class_names[i] if class_names and i < len(class_names) else f"class_{i}"
+        print(f"{name:<30} {class_counts[i]:>10} {images_per_class[i]:>10} {weights[i]:>10.4f}")
+    print("=" * 65)
+    print(f"Total images       : {len(labels)}")
+    print(f"Multi-class images : {multi_class_images} ({100*multi_class_images/max(len(labels),1):.1f}%)")
+    print("=" * 65 + "\n")
+
+    return dict(class_counts=class_counts, images_per_class=images_per_class, weights=weights)
+
+
+def verify_batch_distribution(
+    loader, num_batches: int = 50, class_names: Optional[List[str]] = None
+):
+    """
+    Chạy num_batches rồi in phân phối class thực tế — dùng sau khi tạo loader.
+
+    Usage:
+        verify_batch_distribution(train_loader, num_batches=50, class_names=CLASS_NAMES)
+    """
+    counts = None
+    for i, batch in enumerate(loader):
+        if i >= num_batches:
+            break
+        cls = batch["cls"].clone().to(torch.int).flatten()
+        bc = torch.bincount(cls)
+        if counts is None:
+            counts = bc
+        else:
+            if bc.shape[0] > counts.shape[0]:
+                counts = torch.cat([counts, counts.new_zeros(bc.shape[0] - counts.shape[0])])
+            counts[: bc.shape[0]] += bc
+
+    print(f"\nBatch distribution over {num_batches} batches:")
+    print("=" * 55)
+    for i, cnt in enumerate(counts):
+        name = class_names[i] if class_names and i < len(class_names) else f"class_{i}"
+        bar = "█" * int(40 * cnt.item() / counts.max().item())
+        print(f"{name:<30} {cnt.item():>6}  {bar}")
+    print("=" * 55 + "\n")
+    return counts
+
+
+# ---------------------------------------------------------------------------
+# Sampler
+# ---------------------------------------------------------------------------
+
+class ClassAwareWeightedSampler(torch.utils.data.WeightedRandomSampler):
+    """
+    Oversample minority classes dựa trên inverse-frequency.
+
+    Chiến lược tổng hợp weight khi 1 ảnh có nhiều class (strategy):
+        'max'  → weight = max weight trong các class của ảnh  (aggressive)
+        'mean' → weight = mean                                 (balanced, khuyến nghị)
+        'sum'  → weight = sum                                  (ưu tiên ảnh đa dạng class)
+
+    Args:
+        dataset:            YOLO dataset với `labels`.
+        num_samples:        Số samples/epoch. Mặc định = len(dataset).
+        beta (float):       [0=uniform, 1=full inv-freq]. Mặc định 0.5.
+        strategy (str):     'max' | 'mean' | 'sum'. Mặc định 'mean'.
+        background_weight:  Weight cho ảnh không có foreground.
+    """
+
+    def __init__(
+        self,
+        dataset,
+        num_samples: Optional[int] = None,
+        beta: float = 0.5,
+        strategy: str = "mean",
+        background_weight: Optional[float] = None,
+    ):
+        assert strategy in ("max", "mean", "sum"), \
+            f"strategy must be 'max'|'mean'|'sum', got '{strategy}'"
+
+        self.beta = beta
+        self.strategy = strategy
+
+        labels = _extract_labels(dataset)
+        nc = int(max(c for lb in labels for c in lb) + 1) if labels else 1
+
+        # ── Class weight ─────────────────────────────────────────────────────
+        class_counts = np.zeros(nc, dtype=np.float64)
+        for lb in labels:
+            for c in lb:
+                class_counts[int(c)] += 1
+
+        class_counts = np.maximum(class_counts, 1)
+        freq = class_counts / class_counts.sum()
+        class_weights = 1.0 / (freq ** beta)
+        class_weights /= class_weights.sum()
+        self.class_weights_ = class_weights
+
+        _bg_w = background_weight if background_weight is not None else float(class_weights.min())
+
+        # ── Per-image weight ─────────────────────────────────────────────────
+        sample_weights = np.zeros(len(labels), dtype=np.float64)
+        for i, lb in enumerate(labels):
+            if len(lb) == 0:
+                sample_weights[i] = _bg_w
+                continue
+            ws = class_weights[[int(c) for c in lb]]
+            if strategy == "max":
+                sample_weights[i] = ws.max()
+            elif strategy == "mean":
+                sample_weights[i] = ws.mean()
+            else:
+                sample_weights[i] = ws.sum()
+
+        super().__init__(
+            weights=torch.from_numpy(sample_weights).float(),
+            num_samples=num_samples or len(dataset),
+            replacement=True,
+        )
+
+    def summary(self) -> Dict[str, float]:
+        return {f"class_{i}": float(w) for i, w in enumerate(self.class_weights_)}
+
+
+# ---------------------------------------------------------------------------
+# InfiniteDataLoader
+# ---------------------------------------------------------------------------
+
+class InfiniteDataLoaderV2(dataloader.DataLoader):
+    """
+    InfiniteDataLoader với oversampling tích hợp.
+
+    Extra kwargs:
+        oversample (bool):           Default True.
+        oversample_beta (float):     Default 0.5.
+        oversample_strategy (str):   'max'|'mean'|'sum'. Default 'mean'.
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        oversample: bool = True,
+        oversample_beta: float = 0.5,
+        oversample_strategy: str = "mean",
+        **kwargs: Any,
+    ):
+        if not TORCH_2_0:
+            kwargs.pop("prefetch_factor", None)
+
+        if oversample and kwargs.get("sampler") is None:
+            dataset = args[0] if args else kwargs["dataset"]
+            sampler = ClassAwareWeightedSampler(
+                dataset=dataset,
+                num_samples=len(dataset),
+                beta=oversample_beta,
+                strategy=oversample_strategy,
+            )
+            kwargs["sampler"] = sampler
+            kwargs["shuffle"] = False
+            print(
+                f"[InfiniteDataLoader] Oversampling ON | "
+                f"beta={oversample_beta} | strategy='{oversample_strategy}'"
+            )
+
+        super().__init__(*args, **kwargs)
+        object.__setattr__(self, "batch_sampler", _RepeatSampler(self.batch_sampler))
+        self.iterator = super().__iter__()
+
+    def __len__(self) -> int:
+        return len(self.batch_sampler.sampler)
+
+    def __iter__(self) -> Iterator:
+        for _ in range(len(self)):
+            yield next(self.iterator)
+
+    def __del__(self):
+        try:
+            if not hasattr(self.iterator, "_workers"):
+                return
+            for w in self.iterator._workers:
+                if w.is_alive():
+                    w.terminate()
+            self.iterator._shutdown_workers()
+        except Exception:
+            pass
+
+    def reset(self):
+        self.iterator = self._get_iterator()
