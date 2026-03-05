@@ -466,7 +466,7 @@ class v8DetectionLoss:
         batch: dict[str, torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
-        return self.loss(self.parse_output(preds), batch)
+        return self.loss(self.parse_output(preds), batch) if not self.hyp.use_hm else self.loss(preds, batch)
 
     def loss(self, preds: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """Calculate detection loss using assigned targets."""
@@ -1258,39 +1258,71 @@ class HeatmapLoss(v8DetectionLoss):
 
         self.hm_loss = nn.MSELoss(reduction='mean')
 
-    def get_gt(self, gts, preds, gt_thresh = 0.05):
+    # def get_gt(self, gts, preds, gt_thresh = 0.05):
+    #     # Stack một lần rồi chuyển device một lần
+    #     gts = torch.stack(gts).to(preds.device)   # (B, H, W)
+    #     gts = gts.unsqueeze(1)                      # (B, 1, H, W)
+    #     mask_gts = gts.ge(gt_thresh)
+    #     gts[~mask_gts] = 0.0
+    #     B, C, H, W = gts.shape
+    #     # Resize theo từng scale (batch interpolate thay vì từng file)
+    #     gts = torch.cat([
+    #         torch.nn.functional.interpolate(
+    #             gts,
+    #             size=(H // scale, W // scale),
+    #             mode='bilinear',
+    #             align_corners=False
+    #         ).flatten(1)   # flatten từ dim=1 trở đi
+    #         for scale in self.hyp.hm_scales
+    #     ], dim=1)
+        
+    #     return gts
+
+    def get_gt(self, gts, scale, gt_thresh = 0.05):
         # Stack một lần rồi chuyển device một lần
-        gts = torch.stack(gts).to(preds.device)   # (B, H, W)
+        gts = torch.stack(gts)  # (B, H, W)
         gts = gts.unsqueeze(1)                      # (B, 1, H, W)
-        mask_gts = gts.ge(gt_thresh)
-        gts[~mask_gts] = 0.0
+        # mask_gts = gts.ge(gt_thresh)
+        # gts[~mask_gts] = 0.0
         B, C, H, W = gts.shape
         # Resize theo từng scale (batch interpolate thay vì từng file)
-        gts = torch.cat([
-            torch.nn.functional.interpolate(
+        gts = torch.nn.functional.interpolate(
                 gts,
                 size=(H // scale, W // scale),
                 mode='bilinear',
                 align_corners=False
-            ).flatten(1)   # flatten từ dim=1 trở đi
-            for scale in self.hyp.hm_scales
-        ], dim=1)
-        
+            )
         return gts
 
-    def cal_heatmap_loss(self, preds, batch):
-        pred_hm = preds['heatmaps']
-        gts = self.get_gt(batch['heatmap'], pred_hm)
+    def parse_output(
+        self, preds: dict[str, torch.Tensor] | tuple[torch.Tensor, dict[str, torch.Tensor]]
+    ) -> torch.Tensor:
+        """Parse model predictions to extract features."""
+        return preds[1] if isinstance(preds, tuple) else preds
 
-        loss = self.hm_loss(pred_hm, gts)
+    def cal_heatmap_loss(self, feat, scale, batch):
+        gts = self.get_gt(batch['heatmap'], scale)
+        loss = self.hm_loss(feat, gts.to(feat.device))
         loss = loss * self.hyp.hm
         return loss, loss.detach()
 
     def loss(self, preds: dict[str, torch.Tensor], batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """Calculate detection loss using assigned targets."""
+        if len(preds) == 2:
+            if isinstance(preds[0], torch.Tensor):
+                # val step
+                feats, preds = preds
+            else:
+                preds, feats = preds
+
+        cal_hm_loss = True if feats.shape[1] == 1 else False
         batch_size = preds["boxes"].shape[0]
         det_loss, det_loss_detach = self.get_assigned_targets_and_loss(preds, batch)[1:]
-        hm_loss, hm_loss_detach = self.cal_heatmap_loss(preds, batch)
+        if cal_hm_loss:
+            hm_loss, hm_loss_detach = self.cal_heatmap_loss(feats, self.hyp.imgsz//feats.shape[-1], batch)
+        else:
+            hm_loss = torch.tensor(0, device=det_loss.device)
+            hm_loss_detach = torch.tensor(0, device=det_loss.device)
 
         loss = torch.cat([det_loss, hm_loss.unsqueeze(0)])
         loss_detach = torch.cat([det_loss_detach, hm_loss_detach.unsqueeze(0)])

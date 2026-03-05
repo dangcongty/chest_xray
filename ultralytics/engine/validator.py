@@ -231,10 +231,10 @@ class BaseValidator:
 
 
             # visualize heatmap
-            if not already_vis:
-                if np.random.rand() > 0.5:
-                    self.visualize_hm(batch, preds)
-                    already_vis = True
+            # if not already_vis:
+            #     if np.random.rand() > 0.5:
+            #         self.visualize_hm(batch, preds)
+            #         already_vis = True
                 
             # Postprocess
             with dt[3]:

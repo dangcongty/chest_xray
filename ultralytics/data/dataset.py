@@ -169,7 +169,7 @@ class YOLODataset(BaseDataset):
         self.label_files = img2label_paths(self.im_files)
         self.heatmap_files = []
         if self.use_heatmap:
-            self.heatmap_files = [path.replace("labels", "heatmap_v2").replace(".txt", ".npy") for path in self.label_files]
+            self.heatmap_files = [path.replace("labels", "heatmap").replace(".txt", ".npy") for path in self.label_files]
         cache_path = Path(self.label_files[0]).parent.with_suffix(".cache")
         try:
             cache, exists = load_dataset_cache_file(cache_path), True  # attempt to load a *.cache file

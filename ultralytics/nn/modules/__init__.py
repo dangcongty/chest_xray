@@ -71,6 +71,7 @@ from .conv import (
     DWConvTranspose2d,
     Focus,
     GhostConv,
+    HmPredictor,
     Index,
     LightConv,
     RepConv,

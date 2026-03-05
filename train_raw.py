@@ -2,12 +2,11 @@ import torch
 
 from ultralytics import YOLO
 
-model = YOLO("ultralytics/cfg/models/11/yolo11m-hm.yaml")
-# model.load("yolo11m_pretrained_v2.pt")
-# model.load("yolo11m_pretraine_1k_bg.pt")
+model = YOLO("ultralytics/cfg/models/11/yolo11m.yaml")
+model.load("yolo11m.pt")
+# model = YOLO("runs/heatmap/from_yolo11m_pretraine_1k_bg.pt2/weights/best.pt")
 
 model.train(data='/mnt/workspace/ty/xray/datasets/dataset.yaml',
-            # hyp
             epochs = 500,
             imgsz = 640,
             batch = 16,
@@ -21,7 +20,7 @@ model.train(data='/mnt/workspace/ty/xray/datasets/dataset.yaml',
             # others
             device = 'cuda:1',
             # project = 'runs',
-            name = f'from_yolo11m_pretraine_1k_bg.pt',
+            name = f'raw',
             plots = True,
             resume = False,
             exist_ok = False,
@@ -42,5 +41,6 @@ model.train(data='/mnt/workspace/ty/xray/datasets/dataset.yaml',
             use_ct = False,
 
             # heatmap
-            hm = 0
+            hm = 0,
+            use_hm = False
             )

@@ -24,6 +24,7 @@ __all__ = (
     "LightConv",
     "RepConv",
     "SpatialAttention",
+    "HmPredictor"
 )
 
 
@@ -35,6 +36,17 @@ def autopad(k, p=None, d=1):  # kernel, padding, dilation
         p = k // 2 if isinstance(k, int) else [x // 2 for x in k]  # auto-pad
     return p
 
+class HmPredictor(nn.Module):
+    def __init__(self, c):
+        super().__init__()
+        self.layer = nn.Sequential(
+            nn.Conv2d(c, c//4, 1),  # compress
+            nn.ReLU(),
+            nn.Conv2d(c//4, 1, 1),  # project
+            nn.Sigmoid()
+        )
+    def forward(self, x):
+        return self.layer(x)
 
 class Conv(nn.Module):
     """Standard convolution module with batch normalization and activation.

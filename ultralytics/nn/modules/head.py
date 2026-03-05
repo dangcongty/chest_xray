@@ -1844,12 +1844,12 @@ class Heatmap(Detect):
         #                 Conv(max(x // 4, 16), max(x // 4, 16), 3), 
         #                 nn.Conv2d(max(x // 4, 16), 1, 1)) for x in ch
         # )
-        self.cv4 = nn.ModuleList(
-            SpatialSelfAttention(x) for x in ch
-        )
+        # self.cv4 = nn.ModuleList(
+        #     SpatialSelfAttention(x) for x in ch
+        # )
     @property
     def one2many(self):
-        return dict(box_head=self.cv2, cls_head=self.cv3, hm_head=self.cv4)
+        return dict(box_head=self.cv2, cls_head=self.cv3, hm_head=self.cv3)
     
     def forward_head(
         self, x: list[torch.Tensor], 
@@ -1863,11 +1863,11 @@ class Heatmap(Detect):
         
         bs = x[0].shape[0]  # batch size
         
-        heatmaps = [hm_head[i](x[i]) for i in range(self.nl)]
-        x_heatmaps = [_x * torch.sigmoid(hm) for hm, _x in zip(heatmaps, x)]
-        heatmaps = torch.cat([hm.view(bs, -1) for hm in heatmaps], dim = -1)
+        # heatmaps = [hm_head[i](x[i]) for i in range(self.nl)]
+        # x_heatmaps = [_x * torch.sigmoid(hm) for hm, _x in zip(heatmaps, x)]
+        # heatmaps = torch.cat([hm.view(bs, -1) for hm in heatmaps], dim = -1)
 
-        boxes = torch.cat([box_head[i](x_heatmaps[i]).view(bs, 4 * self.reg_max, -1) for i in range(self.nl)], dim=-1)
-        scores = torch.cat([cls_head[i](x_heatmaps[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
-        return dict(boxes=boxes, scores=scores, feats=x, heatmaps=heatmaps)
+        boxes = torch.cat([box_head[i](x[i]).view(bs, 4 * self.reg_max, -1) for i in range(self.nl)], dim=-1)
+        scores = torch.cat([cls_head[i](x[i]).view(bs, self.nc, -1) for i in range(self.nl)], dim=-1)
+        return dict(boxes=boxes, scores=scores, feats=x, heatmaps=x)
         

@@ -136,6 +136,8 @@ tracker: botsort.yaml # (str) tracker config file: botsort.yaml or bytetrack.yam
 use_hm: True
 hm: 0
 hm_scales: [8, 16, 32]
+hm_layer_scale: 16
+hm_layer: 6
 
 # contrastive
 use_ct: True
