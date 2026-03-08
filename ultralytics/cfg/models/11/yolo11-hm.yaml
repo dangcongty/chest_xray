@@ -47,7 +47,7 @@ head:
   - [[-1, 10], 1, Concat, [1]] # cat head P5
   - [-1, 2, C3k2, [1024, True]] # 22 (P5/32-large)
 
-  - [3, 1, HmPredictor, [256]] # Detect(P3, P4, P5)
+  - [5, 1, HmPredictor, [512]] # Detect(P3, P4, P5)
 
   - [[16, 19, 22], 1, Heatmap, [nc]] # Detect(P3, P4, P5)
 

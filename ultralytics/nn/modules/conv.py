@@ -8,6 +8,7 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
+from torchvision.ops import DeformConv2d
 
 __all__ = (
     "CBAM",
@@ -24,7 +25,8 @@ __all__ = (
     "LightConv",
     "RepConv",
     "SpatialAttention",
-    "HmPredictor"
+    "HmPredictor",
+    "DeformConv"
 )
 
 
@@ -47,6 +49,54 @@ class HmPredictor(nn.Module):
         )
     def forward(self, x):
         return self.layer(x)
+
+
+class DeformConv(nn.Module):
+    """Deformable convolution + BN + Activation"""
+
+    default_act = nn.SiLU()
+
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
+        super().__init__()
+
+        self.k = k
+        self.s = s
+        self.p = autopad(k, p, d)
+
+        # offset conv
+        self.offset = nn.Conv2d(
+            c1,
+            2 * k * k,
+            kernel_size=k,
+            stride=s,
+            padding=self.p,
+            dilation=d
+        )
+
+        # deform conv
+        self.conv = DeformConv2d(
+            c1,
+            c2,
+            kernel_size=k,
+            stride=s,
+            padding=self.p,
+            dilation=d,
+            groups=g,
+            bias=False
+        )
+
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+
+    def forward(self, x):
+        offset = self.offset(x)
+        x = self.conv(x, offset)
+        return self.act(self.bn(x))
+
+    def forward_fuse(self, x):
+        offset = self.offset(x)
+        x = self.conv(x, offset)
+        return self.act(x)
 
 class Conv(nn.Module):
     """Standard convolution module with batch normalization and activation.

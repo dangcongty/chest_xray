@@ -393,6 +393,14 @@ class v8DetectionLoss:
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
         return dist2bbox(pred_dist, anchor_points, xywh=False)
 
+    def focal_loss(self, pred, target, gamma=1.5, alpha=0.25):
+        bce = F.binary_cross_entropy_with_logits(pred, target, reduction="none")
+        p = torch.sigmoid(pred)
+        p_t = p * target + (1 - p) * (1 - target)
+        alpha_t = alpha * target + (1 - alpha) * (1 - target)
+        focal_weight = alpha_t * (1 - p_t) ** gamma
+        return (focal_weight * bce)
+
     def get_assigned_targets_and_loss(self, preds: dict[str, torch.Tensor], batch: dict[str, Any]) -> tuple:
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size and return foreground mask and
         target indices.
@@ -429,7 +437,8 @@ class v8DetectionLoss:
         target_scores_sum = max(target_scores.sum(), 1)
 
         # Cls loss
-        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        # loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        loss[1] = self.focal_loss(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
 
         # Bbox loss
         if fg_mask.sum():

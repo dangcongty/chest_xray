@@ -344,37 +344,50 @@ def build_dataloader(
     oversample_beta = 0.5
     oversample_strategy = 'mean'
     # train
-    if shuffle == True: 
-        return InfiniteDataLoaderV2(
-            dataset=dataset,
-            batch_size=batch,
-            shuffle=shuffle and sampler is None and not use_oversample,
-            num_workers=nw,
-            sampler=sampler,
-            prefetch_factor=4 if nw > 0 else None,
-            pin_memory=nd > 0 and pin_memory,
-            collate_fn=getattr(dataset, "collate_fn", None),
-            worker_init_fn=seed_worker,
-            generator=generator,
-            drop_last=drop_last and len(dataset) % batch != 0,
-            oversample=use_oversample,
-            oversample_beta=oversample_beta,
-            oversample_strategy=oversample_strategy,
-        )
-    else:
-        return InfiniteDataLoader(
-            dataset=dataset,
-            batch_size=batch,
-            shuffle=shuffle and sampler is None,
-            num_workers=nw,
-            sampler=sampler,
-            prefetch_factor=4 if nw > 0 else None,  # increase over default 2
-            pin_memory=nd > 0 and pin_memory,
-            collate_fn=getattr(dataset, "collate_fn", None),
-            worker_init_fn=seed_worker,
-            generator=generator,
-            drop_last=drop_last and len(dataset) % batch != 0,
-        )
+    # if shuffle == True: 
+    #     return InfiniteDataLoaderV2(
+    #         dataset=dataset,
+    #         batch_size=batch,
+    #         shuffle=shuffle and sampler is None and not use_oversample,
+    #         num_workers=nw,
+    #         sampler=sampler,
+    #         prefetch_factor=4 if nw > 0 else None,
+    #         pin_memory=nd > 0 and pin_memory,
+    #         collate_fn=getattr(dataset, "collate_fn", None),
+    #         worker_init_fn=seed_worker,
+    #         generator=generator,
+    #         drop_last=drop_last and len(dataset) % batch != 0,
+    #         oversample=use_oversample,
+    #         oversample_beta=oversample_beta,
+    #         oversample_strategy=oversample_strategy,
+    #     )
+    # else:
+    #     return InfiniteDataLoader(
+    #         dataset=dataset,
+    #         batch_size=batch,
+    #         shuffle=shuffle and sampler is None,
+    #         num_workers=nw,
+    #         sampler=sampler,
+    #         prefetch_factor=4 if nw > 0 else None,  # increase over default 2
+    #         pin_memory=nd > 0 and pin_memory,
+    #         collate_fn=getattr(dataset, "collate_fn", None),
+    #         worker_init_fn=seed_worker,
+    #         generator=generator,
+    #         drop_last=drop_last and len(dataset) % batch != 0,
+    #     )
+    return InfiniteDataLoader(
+        dataset=dataset,
+        batch_size=batch,
+        shuffle=shuffle and sampler is None,
+        num_workers=nw,
+        sampler=sampler,
+        prefetch_factor=4 if nw > 0 else None,  # increase over default 2
+        pin_memory=nd > 0 and pin_memory,
+        collate_fn=getattr(dataset, "collate_fn", None),
+        worker_init_fn=seed_worker,
+        generator=generator,
+        drop_last=drop_last and len(dataset) % batch != 0,
+    )
 
 def check_source(
     source: str | int | Path | list | tuple | np.ndarray | Image.Image | torch.Tensor,

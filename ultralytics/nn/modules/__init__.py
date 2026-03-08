@@ -67,6 +67,7 @@ from .conv import (
     Conv,
     Conv2,
     ConvTranspose,
+    DeformConv,
     DWConv,
     DWConvTranspose2d,
     Focus,
